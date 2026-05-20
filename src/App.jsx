@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const STORAGE_KEY = "choreo-stage-planner-project";
+const AUDIO_BUCKET = "choreo-audio";
 const STAGE_WIDTH = 900;
 const STAGE_HEIGHT = 560;
 const ROLE_COLORS = {
@@ -61,6 +62,20 @@ function escapeSvgText(value = "") {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function safeFilename(value = "") {
+  return String(value || "untitled")
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "_")
+    .slice(0, 80);
+}
+
+function audioPublicUrl(storagePath) {
+  const { url } = supabaseConfig();
+  if (!url || !storagePath) return "";
+  return `${url}/storage/v1/object/public/${AUDIO_BUCKET}/${encodeURI(storagePath)}`;
 }
 
 function interpolate(a, b, progress) {
@@ -238,6 +253,7 @@ function createProject({ title, performanceType, maleCount, femaleCount, names }
     partnerSets: [],
     stage: { width: 100, height: 100 },
     frontZone: { y: 70 },
+    localProjectId: uid("project"),
     updatedAt: new Date().toISOString()
   };
 }
@@ -397,6 +413,32 @@ async function loadFromSupabase(id) {
   return data[0].plan;
 }
 
+async function uploadAudioToSupabase(file, projectKey) {
+  const { url, key } = supabaseConfig();
+  if (!url || !key) throw new Error("Supabase 환경변수가 없습니다.");
+  const extension = file.name.includes(".") ? file.name.split(".").pop() : "audio";
+  const path = `projects/${safeFilename(projectKey || "local")}/${Date.now()}-${safeFilename(file.name || `audio.${extension}`)}`;
+  const response = await fetch(`${url}/storage/v1/object/${AUDIO_BUCKET}/${path}`, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      "Content-Type": file.type || "application/octet-stream",
+      "x-upsert": "true"
+    },
+    body: file
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return {
+    fileName: file.name,
+    size: file.size,
+    type: file.type || "audio/*",
+    storagePath: path,
+    publicUrl: audioPublicUrl(path),
+    uploadedAt: new Date().toISOString()
+  };
+}
+
 function buildStageSvg(plan, sectionIndex, options = {}) {
   const section = plan.sections[sectionIndex];
   const prev = plan.sections[sectionIndex - 1];
@@ -513,6 +555,7 @@ function App() {
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioSrc, setAudioSrc] = useState("");
+  const [audioUploadStatus, setAudioUploadStatus] = useState("idle");
   const [shareUrl, setShareUrl] = useState("");
   const [status, setStatus] = useState("");
   const [magnetCandidateId, setMagnetCandidateId] = useState("");
@@ -524,6 +567,7 @@ function App() {
   const audioRef = useRef(null);
   const svgRef = useRef(null);
   const dragStateRef = useRef(null);
+  const localAudioUrlRef = useRef("");
 
   useEffect(() => {
     if (readonly) {
@@ -532,6 +576,10 @@ function App() {
           const normalized = normalizePlan(loaded);
           setPlan(normalized);
           setSelectedSectionId(normalized.sections[0]?.id || "");
+          if (normalized.audio?.publicUrl) {
+            setAudioSrc(normalized.audio.publicUrl);
+            setAudioUploadStatus("uploaded");
+          }
         })
         .catch((error) => setStatus(error.message));
       return;
@@ -544,6 +592,10 @@ function App() {
           const normalized = normalizePlan(loaded);
           setPlan(normalized);
           setSelectedSectionId(normalized.sections[0]?.id || "");
+          if (normalized.audio?.publicUrl) {
+            setAudioSrc(normalized.audio.publicUrl);
+            setAudioUploadStatus("uploaded");
+          }
         } else {
           localStorage.removeItem(STORAGE_KEY);
           setStatus("깨진 저장 데이터를 초기화했습니다. 새 프로젝트를 만들어 주세요.");
@@ -559,6 +611,10 @@ function App() {
     if (!plan || readonly) return;
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...plan, updatedAt: new Date().toISOString() }));
   }, [plan, readonly]);
+
+  useEffect(() => () => {
+    if (localAudioUrlRef.current) URL.revokeObjectURL(localAudioUrlRef.current);
+  }, []);
 
   useEffect(() => {
     let frame;
@@ -899,12 +955,29 @@ function App() {
     setDragPositions(drag.finalPositions);
   }
 
-  function handleAudioFile(event) {
+  async function handleAudioFile(event) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (audioSrc) URL.revokeObjectURL(audioSrc);
-    setAudioSrc(URL.createObjectURL(file));
-    setStatus("음악 파일을 불러왔습니다.");
+    if (localAudioUrlRef.current) URL.revokeObjectURL(localAudioUrlRef.current);
+    const localUrl = URL.createObjectURL(file);
+    localAudioUrlRef.current = localUrl;
+    setAudioSrc(localUrl);
+    setAudioUploadStatus("uploading");
+    setStatus("음악을 불러왔습니다. 서버에 업로드하는 중...");
+    try {
+      const audio = await uploadAudioToSupabase(file, plan?.localProjectId || plan?.title || "project");
+      updatePlan((current) => ({ ...current, audio }));
+      setAudioSrc(audio.publicUrl);
+      setAudioUploadStatus("uploaded");
+      setStatus(`음악 저장됨: ${audio.fileName}`);
+      if (localAudioUrlRef.current) {
+        URL.revokeObjectURL(localAudioUrlRef.current);
+        localAudioUrlRef.current = "";
+      }
+    } catch (error) {
+      setAudioUploadStatus("failed");
+      setStatus(`음악 업로드 실패: ${error.message}. 현재 세션에서는 재생되지만 새로고침/공유 링크에는 음악이 유지되지 않을 수 있습니다.`);
+    }
   }
 
   function jumpTo(section) {
@@ -997,7 +1070,10 @@ function App() {
       context.drawImage(img, 0, 0, canvas.width, canvas.height);
       canvas.toBlob((png) => {
         const pngUrl = URL.createObjectURL(png);
-        downloadUrl(pngUrl, `${plan.title}-${sortedSections[sectionIndex]?.name || "section"}.png`);
+        const section = sortedSections[sectionIndex];
+        const order = String(sectionIndex + 1).padStart(2, "0");
+        const time = safeFilename(formatTime(pointTime(section || {})));
+        downloadUrl(pngUrl, `${safeFilename(plan.title)}-${order}-${time}-${safeFilename(section?.name || "point")}.png`);
       });
       URL.revokeObjectURL(url);
     };
@@ -1058,6 +1134,19 @@ function App() {
   }
 
   const partnerSet = plan.partnerSets.find((set) => set.id === selectedSection?.partnerSetId);
+  const frontZeroPerformers = plan.performers.filter((performer) => (counts[performer.id] || 0) === 0);
+  const unnamedPerformers = plan.performers.filter((performer) => !String(performer.name || "").trim());
+  const hasPngBackup = false;
+  const audioReady = Boolean(plan.audio?.publicUrl);
+  const audioStatusText = audioUploadStatus === "uploading"
+    ? "음악 업로드 중"
+    : audioUploadStatus === "failed"
+      ? "음악 업로드 실패"
+      : audioReady
+        ? `음악 저장됨: ${plan.audio.fileName || "서버 음악"}`
+        : audioSrc
+          ? "로컬 음악 준비됨"
+          : "음악 없음";
 
   function renderMobileTabs(extraClass = "") {
     return (
@@ -1183,14 +1272,51 @@ function App() {
 
   function renderSharePanel() {
     return (
-      <div className="mobile-share-grid">
-        <label className="file-button">음악 불러오기<input type="file" accept="audio/*" onChange={handleAudioFile} /></label>
-        {!readonly && <button onClick={shareProject}>공유 링크</button>}
-        {!readonly && <button onClick={exportJson}>JSON 저장</button>}
-        {!readonly && <label className="file-button">JSON 열기<input type="file" accept="application/json" onChange={importJson} /></label>}
-        <button onClick={() => exportPng()}>현재 PNG</button>
-        <button onClick={exportAllPng}>전체 PNG</button>
-        <button onClick={() => window.print()}>인쇄/PDF</button>
+      <div className="share-panel">
+        <div className="share-hero">
+          <div>
+            <h2>공유 / 출력</h2>
+            <p>팀원에게 보낼 링크와 수업용 백업 파일을 여기서 준비합니다.</p>
+          </div>
+          {!readonly && <button className="primary" onClick={shareProject}>공유 링크 만들기</button>}
+        </div>
+
+        {shareUrl && (
+          <div className="share-link-box">
+            <span>보기 전용 링크</span>
+            <a href={shareUrl}>{shareUrl}</a>
+          </div>
+        )}
+
+        <div className="share-checklist">
+          <strong>공유 전 확인</strong>
+          <span className={frontZeroPerformers.length ? "check warn" : "check ok"}>
+            앞줄 0회 {frontZeroPerformers.length ? frontZeroPerformers.map((p) => p.name || p.label).join(", ") : "없음"}
+          </span>
+          <span className={unnamedPerformers.length ? "check warn" : "check ok"}>
+            이름 미입력 {unnamedPerformers.length ? `${unnamedPerformers.length}명` : "없음"}
+          </span>
+          <span className={shareUrl ? "check ok" : "check neutral"}>공유 링크 {shareUrl ? "생성됨" : "미생성"}</span>
+          <span className={audioReady ? "check ok" : audioUploadStatus === "failed" ? "check warn" : "check neutral"}>
+            {audioReady ? "음악 포함 공유 준비됨" : audioUploadStatus === "failed" ? "음악 업로드 실패" : "음악 미포함"}
+          </span>
+          <span className={hasPngBackup ? "check ok" : "check neutral"}>PNG/PDF 백업은 버튼으로 즉시 저장</span>
+        </div>
+
+        <div className="share-actions">
+          <button onClick={() => exportPng()}>현재 PNG</button>
+          <button onClick={exportAllPng}>전체 PNG</button>
+          <button onClick={() => window.print()}>인쇄/PDF</button>
+        </div>
+
+        {!readonly && (
+          <div className="backup-actions">
+            <button className="tertiary" onClick={exportJson}>백업 JSON 저장</button>
+            <label className="file-button tertiary">백업 JSON 열기<input type="file" accept="application/json" onChange={importJson} /></label>
+          </div>
+        )}
+
+        <p className="muted">공유 링크 저장이 실패하면 PNG/PDF/JSON으로 대신 공유할 수 있습니다. 음악은 public URL로 저장되어 링크를 아는 사람이 접근할 수 있습니다.</p>
       </div>
     );
   }
@@ -1214,15 +1340,9 @@ function App() {
             onChange={(event) => updatePlan((current) => ({ ...current, title: event.target.value }))}
           />
         </div>
-        <div className="top-actions">
-          <label className="file-button">
-            음악 불러오기
-            <input type="file" accept="audio/*" onChange={handleAudioFile} />
-          </label>
-          {!readonly && <button onClick={shareProject}>공유 링크</button>}
-          {!readonly && <button onClick={exportJson}>JSON 저장</button>}
-          {!readonly && <label className="file-button">JSON 열기<input type="file" accept="application/json" onChange={importJson} /></label>}
-          <button onClick={() => window.print()}>인쇄/PDF</button>
+        <div className="top-summary">
+          <span>{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
+          <strong>{audioStatusText}</strong>
         </div>
       </header>
 
@@ -1273,7 +1393,6 @@ function App() {
                 {isStageFocus ? "패널 보기" : "무대 집중"}
               </button>
               <button onClick={() => exportPng()}>현재 PNG</button>
-              <button onClick={exportAllPng}>전체 PNG</button>
             </div>
           </div>
           <svg ref={svgRef} className="stage" viewBox="0 0 100 100">
@@ -1394,7 +1513,11 @@ function App() {
             })}
           </svg>
           <div className="transport">
-            <button onClick={togglePlayback}>
+            <label className="file-button secondary audio-load">
+              {audioUploadStatus === "uploading" ? "업로드 중..." : "음악 불러오기"}
+              <input type="file" accept="audio/*" onChange={handleAudioFile} />
+            </label>
+            <button className="primary" onClick={togglePlayback}>
               {isPlaying ? "정지" : "재생"}
             </button>
             <input
@@ -1520,6 +1643,9 @@ function App() {
             </ol>
           ) : <p className="muted">토큰을 클릭하면 그 사람의 이동 흐름만 따로 볼 수 있습니다.</p>}
         </div>
+        <div className="card share-card">
+          {renderSharePanel()}
+        </div>
       </section>
 
       <section className="mobile-editor">
@@ -1531,7 +1657,14 @@ function App() {
 
       <section className="print-sheets">
         {sortedSections.map((section, index) => (
-          <article key={section.id} dangerouslySetInnerHTML={{ __html: buildStageSvg({ ...plan, sections: sortedSections }, index, { readonly: true }) }} />
+          <article key={section.id}>
+            <div className="print-meta">
+              <h2>{index + 1}. {section.name}</h2>
+              <p>도착 {formatTime(pointTime(section))} · 이동 {pointMoveDuration(section)}초</p>
+              {section.notes && <p>{section.notes}</p>}
+            </div>
+            <div dangerouslySetInnerHTML={{ __html: buildStageSvg({ ...plan, sections: sortedSections }, index, { readonly: true }) }} />
+          </article>
         ))}
       </section>
     </div>

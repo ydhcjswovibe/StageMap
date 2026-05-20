@@ -36,10 +36,29 @@ button:hover {
   border-color: #64748b;
 }
 
-button.primary {
+button.primary,
+.file-button.primary {
   background: #162033;
   color: #ffffff;
   border-color: #162033;
+}
+
+button.secondary,
+.file-button.secondary {
+  background: #ffffff;
+  border-color: #cbd5e1;
+}
+
+button.tertiary,
+.file-button.tertiary {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  color: #475569;
+}
+
+button:active,
+.file-button:active {
+  transform: translateY(1px);
 }
 
 input,
@@ -147,6 +166,20 @@ label {
   background: #ffffff;
   border: 1px solid #dbe3ee;
   border-radius: 10px;
+}
+
+.top-summary {
+  display: grid;
+  gap: 3px;
+  justify-items: end;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.top-summary strong {
+  color: #162033;
 }
 
 .title-input {
@@ -385,10 +418,14 @@ h3 {
 
 .transport {
   display: grid;
-  grid-template-columns: 74px 1fr 118px;
+  grid-template-columns: 136px 74px 1fr 118px;
   align-items: center;
   gap: 10px;
   margin-top: 12px;
+}
+
+.audio-load {
+  min-height: 41px;
 }
 
 .time-readout {
@@ -445,7 +482,7 @@ h3 {
 
 .bottom-grid {
   display: grid;
-  grid-template-columns: 1.35fr 1fr;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(320px, 0.8fr);
   gap: 14px;
   margin-top: 14px;
 }
@@ -538,6 +575,97 @@ h3 {
   gap: 10px;
 }
 
+.share-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.share-hero {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.share-hero p {
+  margin: 6px 0 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.share-link-box {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.share-link-box span {
+  color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.share-link-box a {
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 800;
+  word-break: break-all;
+}
+
+.share-checklist {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.share-checklist strong {
+  font-size: 13px;
+}
+
+.check {
+  display: block;
+  border-radius: 7px;
+  padding: 7px 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.check.ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.check.warn {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.check.neutral {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.share-actions,
+.backup-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.share-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.backup-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .mobile-tabs {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -626,6 +754,20 @@ h3 {
     page-break-inside: avoid;
   }
 
+  .print-meta {
+    margin-bottom: 8px;
+  }
+
+  .print-meta h2 {
+    font-size: 18px;
+  }
+
+  .print-meta p {
+    margin: 4px 0;
+    color: #334155;
+    font-size: 12px;
+  }
+
   .print-sheets svg {
     width: 100%;
     height: auto;
@@ -644,8 +786,8 @@ h3 {
     padding: 12px;
   }
 
-  .top-actions {
-    display: none;
+  .top-summary {
+    justify-items: start;
   }
 
   .title-input {
@@ -680,7 +822,7 @@ h3 {
 
   .stage-toolbar .row-actions {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
 
   .stage-toolbar button,
@@ -699,12 +841,22 @@ h3 {
   }
 
   .transport {
-    grid-template-columns: 74px 1fr;
+    grid-template-columns: 1fr 74px;
+  }
+
+  .transport input[type="range"] {
+    grid-column: 1 / -1;
   }
 
   .time-readout {
     grid-column: 1 / -1;
     text-align: left;
+  }
+
+  .share-hero,
+  .share-actions,
+  .backup-actions {
+    grid-template-columns: 1fr;
   }
 
   .mobile-editor {
@@ -769,7 +921,7 @@ h3 {
   }
 
   .topbar .eyebrow,
-  .top-actions {
+  .top-summary {
     display: none;
   }
 
@@ -811,7 +963,7 @@ h3 {
 
   .stage-toolbar .row-actions {
     display: grid;
-    grid-template-columns: repeat(4, minmax(70px, 1fr));
+    grid-template-columns: repeat(3, minmax(76px, 1fr));
     gap: 6px;
   }
 
@@ -825,7 +977,7 @@ h3 {
   }
 
   .transport {
-    grid-template-columns: 68px 1fr 104px;
+    grid-template-columns: 126px 68px 1fr 104px;
     margin-top: 8px;
   }
 
@@ -838,7 +990,10 @@ h3 {
     grid-template-columns: 1fr;
   }
 
-  .landscape-panel .mobile-share-grid {
+  .landscape-panel .mobile-share-grid,
+  .landscape-panel .share-hero,
+  .landscape-panel .share-actions,
+  .landscape-panel .backup-actions {
     grid-template-columns: 1fr;
   }
 
