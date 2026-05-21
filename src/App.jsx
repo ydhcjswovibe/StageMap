@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createProjectJsonDownload } from "./projectJson.mjs";
 
 const STORAGE_KEY = "choreo-stage-planner-project";
 const AUDIO_BUCKET = "choreo-audio";
@@ -1444,9 +1445,9 @@ function App() {
   }
 
   function exportJson() {
-    const blob = new Blob([JSON.stringify(plan, null, 2)], { type: "application/json" });
+    const { blob, filename } = createProjectJsonDownload(plan);
     const url = URL.createObjectURL(blob);
-    downloadUrl(url, `${plan.title || "choreo-project"}.json`);
+    downloadUrl(url, filename);
   }
 
   function importJson(event) {
@@ -1758,12 +1759,12 @@ function App() {
 
         {!readonly && (
           <div className="backup-actions">
-            <button className="tertiary" onClick={exportJson}>이 안무 저장하기</button>
+            <button className="tertiary" onClick={exportJson}>저장하기</button>
             <label className="file-button tertiary">저장한 안무 열기<input type="file" accept="application/json" onChange={importJson} /></label>
           </div>
         )}
 
-        <p className="muted">공유 링크 저장이 실패하면 이 안무 저장하기 또는 PNG/PDF로 대신 공유할 수 있습니다. 안무 파일은 .json 형식으로 저장되며, 음악은 public URL로 저장되어 링크를 아는 사람이 접근할 수 있습니다.</p>
+        <p className="muted">공유 링크 저장이 실패하면 저장하기 또는 PNG/PDF로 대신 공유할 수 있습니다. 안무 파일은 .json 형식으로 저장되며, 음악은 public URL로 저장되어 링크를 아는 사람이 접근할 수 있습니다.</p>
       </div>
     );
   }
@@ -1803,6 +1804,11 @@ function App() {
                 <span>{formatTime(currentTime)} · 도착 {activeSection ? formatTime(pointTime(activeSection)) : "0:00.0"}</span>
               </div>
             </div>
+            {!readonly && (
+              <div className="stage-toolbar-actions">
+                <button className="secondary" onClick={exportJson}>저장하기</button>
+              </div>
+            )}
           </div>
           {!readonly && <p className="stage-hint">음악을 재생하고 원하는 순간에 대형을 만드세요.</p>}
           <div className="stage-frame">

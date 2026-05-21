@@ -355,6 +355,12 @@ h3 {
   gap: 5px;
 }
 
+.stage-toolbar-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
 .stage-title-input {
   width: min(420px, 100%);
   min-width: 0;
@@ -1027,6 +1033,14 @@ h3 {
     gap: 6px;
   }
 
+  .stage-toolbar-actions {
+    justify-content: stretch;
+  }
+
+  .stage-toolbar-actions button {
+    width: 100%;
+  }
+
   .stage-title-input {
     width: 100%;
     font-size: 16px;
@@ -1222,6 +1236,14 @@ h3 {
     display: grid;
     gap: 8px;
     margin-bottom: 6px;
+  }
+
+  .stage-toolbar-actions {
+    justify-content: stretch;
+  }
+
+  .stage-toolbar-actions button {
+    width: 100%;
   }
 
   .stage-title-input {
