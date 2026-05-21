@@ -409,6 +409,9 @@ function findSectionIndex(sections, time) {
 function displayPositions(plan, sectionIndex, time, playing) {
   const points = plan.sections;
   if (!points.length) return {};
+  if (!playing) {
+    return (points[sectionIndex] || points[0])?.positions || {};
+  }
   let targetIndex = points.findIndex((point, index) => index > 0 && time >= pointMoveStart(point) && time < pointTime(point));
   if (targetIndex < 0) {
     targetIndex = findSectionIndex(points, time);
@@ -626,6 +629,7 @@ function App() {
   const [shareUrl, setShareUrl] = useState("");
   const [status, setStatus] = useState("");
   const [magnetCandidateId, setMagnetCandidateId] = useState("");
+  const [dragHint, setDragHint] = useState("");
   const [selectedPairKey, setSelectedPairKey] = useState("");
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [dragPositions, setDragPositions] = useState(null);
@@ -636,6 +640,7 @@ function App() {
   const audioRef = useRef(null);
   const svgRef = useRef(null);
   const dragStateRef = useRef(null);
+  const longPressTimerRef = useRef(null);
   const localAudioUrlRef = useRef("");
 
   function restoreAudioFromPlan(nextPlan, options = {}) {
@@ -774,7 +779,20 @@ function App() {
   }
 
   function clientToStagePoint(event) {
-    const rect = svgRef.current.getBoundingClientRect();
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const screenMatrix = svg.getScreenCTM();
+    if (screenMatrix) {
+      const point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      const svgPoint = point.matrixTransform(screenMatrix.inverse());
+      return {
+        x: clamp(svgPoint.x, 0, 100),
+        y: clamp(svgPoint.y, 0, 100)
+      };
+    }
+    const rect = svg.getBoundingClientRect();
     return {
       x: clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100),
       y: clamp(((event.clientY - rect.top) / rect.height) * 100, 0, 100)
@@ -783,6 +801,14 @@ function App() {
 
   function getPartnerSetForSection(section) {
     return plan.partnerSets.find((set) => set.id === section?.partnerSetId);
+  }
+
+  function pairForPerformer(pairs = [], performerId) {
+    return pairs.find((pair) => pair.includes(performerId)) || null;
+  }
+
+  function performerById(performerId) {
+    return plan.performers.find((performer) => performer.id === performerId);
   }
 
   function findMagnetCandidate(performerId, nextPosition, positions, pairs = []) {
@@ -799,6 +825,61 @@ function App() {
       }
     });
     return nearest?.id || "";
+  }
+
+  function findSameRoleSwapCandidate(performerId, nextPosition, positions, pairs = []) {
+    const performer = performerById(performerId);
+    if (!performer) return null;
+    const sourcePair = pairForPerformer(pairs, performerId);
+    if (!sourcePair) return null;
+    let nearest = null;
+    pairs.forEach((pair) => {
+      if (pair.includes(performerId)) return;
+      const sameRoleId = pair.find((id) => performerById(id)?.role === performer.role);
+      if (!sameRoleId) return;
+      const sameRolePosition = positions?.[sameRoleId];
+      const pairPositions = pair.map((id) => positions?.[id]).filter(Boolean);
+      if (!sameRolePosition || !pairPositions.length) return;
+      const center = {
+        x: pairPositions.reduce((sum, pos) => sum + pos.x, 0) / pairPositions.length,
+        y: pairPositions.reduce((sum, pos) => sum + pos.y, 0) / pairPositions.length
+      };
+      const gap = Math.min(distance(nextPosition, sameRolePosition), distance(nextPosition, center));
+      if (gap <= MAGNET_DISTANCE * 2 && (!nearest || gap < nearest.gap)) {
+        nearest = { targetId: sameRoleId, pair, gap };
+      }
+    });
+    return nearest;
+  }
+
+  function swapSameRolePair(sectionId, performerId, targetId) {
+    const sourcePerformer = performerById(performerId);
+    const targetPerformer = performerById(targetId);
+    const setId = selectedSection?.partnerSetId;
+    if (!setId || !sourcePerformer || !targetPerformer || sourcePerformer.role !== targetPerformer.role) return false;
+    const currentSet = plan.partnerSets.find((set) => set.id === setId);
+    const sourcePairIndex = currentSet?.pairs?.findIndex((pair) => pair.includes(performerId)) ?? -1;
+    const targetPairIndex = currentSet?.pairs?.findIndex((pair) => pair.includes(targetId)) ?? -1;
+    if (sourcePairIndex < 0 || targetPairIndex < 0 || sourcePairIndex === targetPairIndex) return false;
+    updatePlan((current) => ({
+      ...current,
+      partnerSets: current.partnerSets.map((set) => {
+        if (set.id !== setId) return set;
+        if (sourcePairIndex < 0 || targetPairIndex < 0 || sourcePairIndex === targetPairIndex) return set;
+        return {
+          ...set,
+          pairs: set.pairs.map((pair, index) => {
+            if (index === sourcePairIndex) return pair.map((id) => id === performerId ? targetId : id);
+            if (index === targetPairIndex) return pair.map((id) => id === targetId ? performerId : id);
+            return pair;
+          })
+        };
+      }),
+      sections: current.sections.map((section) => section.id === sectionId ? { ...section } : section)
+    }));
+    setSelectedPairKey("");
+    setStatus(`${sourcePerformer.name || sourcePerformer.label}와 ${targetPerformer.name || targetPerformer.label}를 교체했습니다.`);
+    return true;
   }
 
   function connectPair(sectionId, firstId, secondId, center = null) {
@@ -931,6 +1012,13 @@ function App() {
     setStatus(`${selectedSection.name} 대형을 기본 배치로 초기화했습니다.`);
   }
 
+  function clearLongPressTimer() {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }
+
   function onStagePointerDown(event, performerId) {
     if (readonly || !selectedSection) return;
     event.preventDefault();
@@ -940,11 +1028,57 @@ function App() {
     setIsBottomSheetExpanded(false);
     const pointer = clientToStagePoint(event);
     const token = selectedSection.positions?.[performerId] || { x: pointer.x, y: pointer.y };
+    const partnerSet = getPartnerSetForSection(selectedSection);
+    const performerPair = pairForPerformer(partnerSet?.pairs || [], performerId);
+    if (performerPair && !event.altKey) {
+      const [firstId, secondId] = performerPair;
+      const firstStart = { ...(selectedSection.positions[firstId] || { x: pointer.x, y: pointer.y }) };
+      const secondStart = { ...(selectedSection.positions[secondId] || { x: pointer.x, y: pointer.y }) };
+      dragStateRef.current = {
+        type: "pair",
+        source: "token",
+        draggedPerformerId: performerId,
+        pair: [...performerPair],
+        sectionId: selectedSection.id,
+        pointerId: event.pointerId,
+        pointer,
+        startPointer: pointer,
+        moved: false,
+        startPositions: {
+          [firstId]: firstStart,
+          [secondId]: secondStart
+        },
+        finalPositions: {
+          [firstId]: firstStart,
+          [secondId]: secondStart
+        }
+      };
+      setSelectedPairKey(pairKey(performerPair));
+      setDragPositions(dragStateRef.current.finalPositions);
+      clearLongPressTimer();
+      longPressTimerRef.current = setTimeout(() => {
+        const drag = dragStateRef.current;
+        if (!drag || drag.type !== "pair" || drag.pointerId !== event.pointerId || drag.moved || drag.sectionId !== selectedSection.id) return;
+        const currentToken = drag.startPositions[performerId] || token;
+        drag.type = "token";
+        drag.performerId = performerId;
+        drag.individualAdjust = true;
+        drag.sourcePair = [...performerPair];
+        drag.offsetX = currentToken.x - drag.pointer.x;
+        drag.offsetY = currentToken.y - drag.pointer.y;
+        drag.finalPositions = { [performerId]: currentToken };
+        setDragPositions(drag.finalPositions);
+        setDragHint("개별 조정 중");
+      }, 450);
+      return;
+    }
     dragStateRef.current = {
       type: "token",
       performerId,
       sectionId: selectedSection.id,
       pointerId: event.pointerId,
+      individualAdjust: Boolean(performerPair && event.altKey),
+      sourcePair: performerPair ? [...performerPair] : null,
       offsetX: token.x - pointer.x,
       offsetY: token.y - pointer.y,
       pointer,
@@ -958,8 +1092,20 @@ function App() {
   function onStagePointerMove(event, performerId) {
     if (readonly || !selectedSection) return;
     const drag = dragStateRef.current;
-    if (!drag || drag.performerId !== performerId || drag.sectionId !== selectedSection.id || drag.pointerId !== event.pointerId) return;
+    if (!drag || drag.sectionId !== selectedSection.id || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
+    if (drag.type === "pair") {
+      if (drag.draggedPerformerId !== performerId) return;
+      const pointer = clientToStagePoint(event);
+      if (distance(pointer, drag.startPointer || drag.pointer) > 0.8) {
+        drag.moved = true;
+        clearLongPressTimer();
+      }
+      updatePairDrag(event, drag, pointer);
+      return;
+    }
+    if (drag.performerId !== performerId) return;
+    clearLongPressTimer();
     const pointer = clientToStagePoint(event);
     const rawPosition = {
       x: clamp(pointer.x + drag.offsetX, 4, 96),
@@ -972,16 +1118,32 @@ function App() {
     };
     const partnerSet = getPartnerSetForSection(selectedSection);
     const nextPositions = { ...selectedSection.positions, [performerId]: nextPosition };
-    const candidateId = findMagnetCandidate(performerId, nextPosition, nextPositions, partnerSet?.pairs || []);
+    const swapCandidate = drag.individualAdjust
+      ? findSameRoleSwapCandidate(performerId, nextPosition, nextPositions, partnerSet?.pairs || [])
+      : null;
+    const candidateId = swapCandidate?.targetId || findMagnetCandidate(performerId, nextPosition, nextPositions, partnerSet?.pairs || []);
     drag.candidateId = candidateId;
+    drag.swapCandidate = swapCandidate;
     drag.pointer = pointer;
     drag.finalPositions = { [performerId]: nextPosition };
+    setDragHint(swapCandidate
+      ? `놓으면 ${(performerById(swapCandidate.targetId)?.name || performerById(swapCandidate.targetId)?.label || "대상")}와 교체`
+      : drag.individualAdjust
+        ? "개별 조정 중"
+        : candidateId
+          ? "놓으면 파트너 연결"
+          : "");
     setMagnetCandidateId(candidateId);
     setDragPositions(drag.finalPositions);
   }
 
   function finishTokenDrag() {
+    clearLongPressTimer();
     const drag = dragStateRef.current;
+    if (drag?.type === "pair") {
+      finishPairDrag();
+      return;
+    }
     if (drag?.type === "token" && drag.finalPositions) {
       updatePlan((current) => ({
         ...current,
@@ -995,10 +1157,12 @@ function App() {
             }
           };
         })
-      }));
+    }));
     }
     const candidateId = drag?.candidateId || magnetCandidateId;
-    if (drag?.type === "token" && candidateId) {
+    if (drag?.type === "token" && drag.swapCandidate?.targetId) {
+      swapSameRolePair(drag.sectionId, drag.performerId, drag.swapCandidate.targetId);
+    } else if (drag?.type === "token" && candidateId) {
       const dragged = drag.finalPositions?.[drag.performerId] || selectedSection?.positions?.[drag.performerId];
       const target = selectedSection?.positions?.[candidateId];
       const center = dragged && target
@@ -1007,17 +1171,21 @@ function App() {
       connectPair(drag.sectionId, drag.performerId, candidateId, snapPoint(center, snapEnabled));
     }
     setMagnetCandidateId("");
+    setDragHint("");
     setDragPositions(null);
     dragStateRef.current = null;
   }
 
   function clearDrag() {
+    clearLongPressTimer();
     setMagnetCandidateId("");
+    setDragHint("");
     setDragPositions(null);
     dragStateRef.current = null;
   }
 
   function finishPairDrag() {
+    clearLongPressTimer();
     const drag = dragStateRef.current;
     if (drag?.type === "pair" && drag.finalPositions) {
       updatePlan((current) => ({
@@ -1035,6 +1203,7 @@ function App() {
       }));
     }
     setDragPositions(null);
+    setDragHint("");
     dragStateRef.current = null;
   }
 
@@ -1043,6 +1212,7 @@ function App() {
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    clearLongPressTimer();
     setIsBottomSheetExpanded(false);
     const pointer = clientToStagePoint(event);
     const [firstId, secondId] = pair;
@@ -1066,16 +1236,11 @@ function App() {
     setSelectedPairKey(pairKey(pair));
   }
 
-  function onPairPointerMove(event) {
-    if (readonly) return;
-    const drag = dragStateRef.current;
-    if (!drag || drag.type !== "pair" || drag.sectionId !== selectedSection?.id || drag.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    const pointer = clientToStagePoint(event);
+  function updatePairDrag(event, drag, pointer = clientToStagePoint(event)) {
     const [firstId, secondId] = drag.pair;
     const firstStart = drag.startPositions[firstId];
     const secondStart = drag.startPositions[secondId];
-    if (!firstStart || !secondStart) return;
+    if (!firstStart || !secondStart) return null;
     let dx = pointer.x - drag.pointer.x;
     let dy = pointer.y - drag.pointer.y;
     if (snapEnabled && !event.altKey) {
@@ -1098,6 +1263,16 @@ function App() {
       [secondId]: { x: secondStart.x + dx, y: secondStart.y + dy }
     };
     setDragPositions(drag.finalPositions);
+    setDragHint(drag.source === "token" ? "커플 이동 중" : "");
+    return drag.finalPositions;
+  }
+
+  function onPairPointerMove(event) {
+    if (readonly) return;
+    const drag = dragStateRef.current;
+    if (!drag || drag.type !== "pair" || drag.sectionId !== selectedSection?.id || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    updatePairDrag(event, drag);
   }
 
   async function handleAudioFile(event) {
@@ -1397,8 +1572,8 @@ function App() {
         </div>
         <div className="tool-card">
           <strong>현재 선택</strong>
-          <span>{selectedPerformer ? `${selectedPerformer.name || selectedPerformer.label} 토큰` : selectedPairKey ? "선택 커플" : "선택 없음"}</span>
-          <p className="muted">토큰을 드래그해 배치하고, 다른 토큰과 겹치게 놓으면 커플로 연결됩니다. 격자 맞춤과 무대 크게 보기는 무대 오른쪽 위 아이콘으로 조작합니다.</p>
+          <span>{dragHint || (selectedPerformer ? `${selectedPerformer.name || selectedPerformer.label} 토큰` : selectedPairKey ? "선택 커플" : "선택 없음")}</span>
+          <p className="muted">커플은 아무 토큰이나 잡고 이동합니다. 한 사람만 조정하거나 교체하려면 길게 누른 뒤 드래그하거나 Alt/Option을 누르고 드래그하세요.</p>
           {!readonly && <button className="danger-button compact-danger" onClick={resetSelectedFormation}>대형 초기화</button>}
         </div>
         <div className="partner-box">
@@ -1601,7 +1776,7 @@ function App() {
                 const from = visiblePositions[a];
                 const to = visiblePositions[b];
                 if (!from || !to) return null;
-                const selected = selectedPairKey === pairKey([a, b]);
+                const selected = selectedPairKey === pairKey([a, b]) || (magnetCandidateId && [a, b].includes(magnetCandidateId));
                 return <line key={`pair-${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke={selected ? "#b4234f" : "#334155"} strokeWidth={selected ? "1.1" : "0.55"} opacity={selected ? "0.9" : "0.58"} />;
               })}
               {magnetCandidateId && dragStateRef.current?.type === "token" && (() => {
@@ -1613,7 +1788,7 @@ function App() {
                   <g className="magnet-preview">
                     <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke="#b4234f" strokeWidth="0.9" strokeDasharray="2 1.4" />
                     <rect x={mid.x - 10} y={mid.y - 6.6} width="20" height="4.4" rx="1.3" fill="#b4234f" />
-                    <text x={mid.x} y={mid.y - 3.5} textAnchor="middle" fontSize="2.2" fill="#fff" fontWeight="800" pointerEvents="none">놓으면 연결</text>
+                    <text x={mid.x} y={mid.y - 3.5} textAnchor="middle" fontSize="2.2" fill="#fff" fontWeight="800" pointerEvents="none">{dragHint || "놓으면 연결"}</text>
                   </g>
                 );
               })()}
