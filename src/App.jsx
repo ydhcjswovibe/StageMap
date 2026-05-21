@@ -17,8 +17,8 @@ const PERFORMANCE_TYPES = {
 };
 
 const MOBILE_TABS = [
-  ["points", "지점"],
-  ["settings", "설정"],
+  ["formations", "대형"],
+  ["arrange", "배치"],
   ["performers", "출연자"],
   ["share", "공유"]
 ];
@@ -76,6 +76,43 @@ function audioPublicUrl(storagePath) {
   const { url } = supabaseConfig();
   if (!url || !storagePath) return "";
   return `${url}/storage/v1/object/public/${AUDIO_BUCKET}/${encodeURI(storagePath)}`;
+}
+
+function resolveAudioUrl(audio) {
+  if (!audio) return "";
+  return audio.publicUrl || audioPublicUrl(audio.storagePath);
+}
+
+function audioUrlCandidates(audio) {
+  if (!audio) return [];
+  return [audio.publicUrl, audioPublicUrl(audio.storagePath)].filter(Boolean).filter((url, index, urls) => urls.indexOf(url) === index);
+}
+
+function audioFingerprint(file) {
+  return [
+    safeFilename(file.name || "audio"),
+    file.size || 0,
+    file.lastModified || 0
+  ].join("-");
+}
+
+function audioMatchesFile(audio, file, fingerprint = audioFingerprint(file)) {
+  if (!audio || !file) return false;
+  if (audio.fingerprint && audio.fingerprint === fingerprint) return true;
+  return audio.fileName === file.name && audio.size === file.size && (!audio.type || audio.type === (file.type || "audio/*"));
+}
+
+function audioMetadataFromFile(file, storagePath, fingerprint) {
+  return {
+    fileName: file.name,
+    size: file.size,
+    type: file.type || "audio/*",
+    lastModified: file.lastModified || 0,
+    fingerprint,
+    storagePath,
+    publicUrl: audioPublicUrl(storagePath),
+    uploadedAt: new Date().toISOString()
+  };
 }
 
 function interpolate(a, b, progress) {
@@ -173,6 +210,7 @@ function normalizePlan(plan) {
   if (!plan?.sections) return plan;
   return {
     ...plan,
+    localProjectId: plan.localProjectId || uid("project"),
     sections: plan.sections.map(normalizeSection).sort((a, b) => pointTime(a) - pointTime(b))
   };
 }
@@ -413,30 +451,28 @@ async function loadFromSupabase(id) {
   return data[0].plan;
 }
 
-async function uploadAudioToSupabase(file, projectKey) {
+async function uploadAudioToSupabase(file, projectKey, fingerprint = audioFingerprint(file)) {
   const { url, key } = supabaseConfig();
   if (!url || !key) throw new Error("Supabase 환경변수가 없습니다.");
   const extension = file.name.includes(".") ? file.name.split(".").pop() : "audio";
-  const path = `projects/${safeFilename(projectKey || "local")}/${Date.now()}-${safeFilename(file.name || `audio.${extension}`)}`;
+  const path = `projects/${safeFilename(projectKey || "local")}/audio/${safeFilename(fingerprint)}-${safeFilename(file.name || `audio.${extension}`)}`;
   const response = await fetch(`${url}/storage/v1/object/${AUDIO_BUCKET}/${path}`, {
     method: "POST",
     headers: {
       apikey: key,
       Authorization: `Bearer ${key}`,
-      "Content-Type": file.type || "application/octet-stream",
-      "x-upsert": "true"
+      "Content-Type": file.type || "application/octet-stream"
     },
     body: file
   });
-  if (!response.ok) throw new Error(await response.text());
-  return {
-    fileName: file.name,
-    size: file.size,
-    type: file.type || "audio/*",
-    storagePath: path,
-    publicUrl: audioPublicUrl(path),
-    uploadedAt: new Date().toISOString()
-  };
+  if (!response.ok) {
+    const errorText = await response.text();
+    if ((response.status === 400 || response.status === 409) && /already exists|duplicate|exists/i.test(errorText)) {
+      return audioMetadataFromFile(file, path, fingerprint);
+    }
+    throw new Error(errorText);
+  }
+  return audioMetadataFromFile(file, path, fingerprint);
 }
 
 function buildStageSvg(plan, sectionIndex, options = {}) {
@@ -562,12 +598,32 @@ function App() {
   const [selectedPairKey, setSelectedPairKey] = useState("");
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [dragPositions, setDragPositions] = useState(null);
-  const [mobileTab, setMobileTab] = useState("points");
+  const [activeToolTab, setActiveToolTab] = useState("formations");
+  const [isBottomSheetOpen, setIsBottomSheetOpen] = useState(false);
+  const [isBottomSheetExpanded, setIsBottomSheetExpanded] = useState(false);
   const [isStageFocus, setIsStageFocus] = useState(false);
   const audioRef = useRef(null);
   const svgRef = useRef(null);
   const dragStateRef = useRef(null);
   const localAudioUrlRef = useRef("");
+
+  function restoreAudioFromPlan(nextPlan, options = {}) {
+    const restoredAudioUrl = resolveAudioUrl(nextPlan?.audio);
+    if (!restoredAudioUrl) {
+      if (options.clearWhenMissing) {
+        setAudioSrc("");
+        setAudioUploadStatus("idle");
+      }
+      return false;
+    }
+    if (localAudioUrlRef.current) {
+      URL.revokeObjectURL(localAudioUrlRef.current);
+      localAudioUrlRef.current = "";
+    }
+    setAudioSrc(restoredAudioUrl);
+    setAudioUploadStatus("uploaded");
+    return true;
+  }
 
   useEffect(() => {
     if (readonly) {
@@ -576,10 +632,7 @@ function App() {
           const normalized = normalizePlan(loaded);
           setPlan(normalized);
           setSelectedSectionId(normalized.sections[0]?.id || "");
-          if (normalized.audio?.publicUrl) {
-            setAudioSrc(normalized.audio.publicUrl);
-            setAudioUploadStatus("uploaded");
-          }
+          restoreAudioFromPlan(normalized, { clearWhenMissing: true });
         })
         .catch((error) => setStatus(error.message));
       return;
@@ -592,10 +645,7 @@ function App() {
           const normalized = normalizePlan(loaded);
           setPlan(normalized);
           setSelectedSectionId(normalized.sections[0]?.id || "");
-          if (normalized.audio?.publicUrl) {
-            setAudioSrc(normalized.audio.publicUrl);
-            setAudioUploadStatus("uploaded");
-          }
+          restoreAudioFromPlan(normalized, { clearWhenMissing: true });
         } else {
           localStorage.removeItem(STORAGE_KEY);
           setStatus("깨진 저장 데이터를 초기화했습니다. 새 프로젝트를 만들어 주세요.");
@@ -735,25 +785,29 @@ function App() {
   }
 
   function addSection() {
-    const last = sortedSections[sortedSections.length - 1];
-    const positions = last?.positions || Object.fromEntries(plan.performers.map((p, index) => [p.id, { x: 18 + index * 8, y: 55 }]));
-    const time = last ? pointTime(last) + 8 : 0;
-    const moveDuration = last ? 4 : 0;
+    const captureTime = audioRef.current ? audioRef.current.currentTime || currentTime : currentTime;
+    const time = Math.max(0, captureTime);
+    const prevIndex = Math.max(0, findSectionIndex(sortedSections, time));
+    const previous = sortedSections[prevIndex] || sortedSections[sortedSections.length - 1];
+    const positions = previous?.positions || Object.fromEntries(plan.performers.map((p, index) => [p.id, { x: 18 + index * 8, y: 55 }]));
+    const gap = previous ? Math.max(0, time - pointTime(previous)) : 0;
+    const moveDuration = previous ? Math.min(4, gap) : 0;
     const section = {
       id: uid("sec"),
-      name: "새 대형 지점",
+      name: `대형 ${formatTime(time)}`,
       time,
       moveDuration,
       start: Math.max(0, time - moveDuration),
       end: time,
-      notes: "",
+      notes: "음악을 들으며 현재 시각에 저장한 대형입니다.",
       moveMode: "smooth",
       positions: JSON.parse(JSON.stringify(positions)),
       frontFocus: [],
-      partnerSetId: ""
+      partnerSetId: previous?.partnerSetId || ""
     };
     updatePlan((current) => ({ ...current, sections: [...current.sections, section] }));
     setSelectedSectionId(section.id);
+    setStatus(`${formatTime(time)}에 대형 지점을 추가했습니다. 이제 무대에서 위치를 수정하세요.`);
   }
 
   function duplicateSection() {
@@ -762,7 +816,9 @@ function App() {
       ? plan.partnerSets.find((set) => set.id === selectedSection.partnerSetId)
       : null;
     const copiedPartnerSetId = copiedPartnerSet ? uid("partners") : "";
-    const time = pointTime(selectedSection) + 8;
+    const playbackTime = audioRef.current ? audioRef.current.currentTime || currentTime : currentTime;
+    const fallbackTime = pointTime(selectedSection) + 8;
+    const time = playbackTime > 0 && Math.abs(playbackTime - pointTime(selectedSection)) > 0.2 ? playbackTime : fallbackTime;
     const moveDuration = pointMoveDuration(selectedSection);
     const section = {
       ...JSON.parse(JSON.stringify(selectedSection)),
@@ -798,6 +854,7 @@ function App() {
     event.currentTarget.setPointerCapture(event.pointerId);
     setSelectedPerformerId(performerId);
     setSelectedPairKey("");
+    setIsBottomSheetExpanded(false);
     const pointer = clientToStagePoint(event);
     const token = selectedSection.positions?.[performerId] || { x: pointer.x, y: pointer.y };
     dragStateRef.current = {
@@ -901,6 +958,7 @@ function App() {
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    setIsBottomSheetExpanded(false);
     const pointer = clientToStagePoint(event);
     const [firstId, secondId] = pair;
     dragStateRef.current = {
@@ -958,25 +1016,48 @@ function App() {
   async function handleAudioFile(event) {
     const file = event.target.files?.[0];
     if (!file) return;
+    const fingerprint = audioFingerprint(file);
+    const restoredAudioUrl = resolveAudioUrl(plan.audio);
+    if (restoredAudioUrl && audioMatchesFile(plan.audio, file, fingerprint)) {
+      if (localAudioUrlRef.current) {
+        URL.revokeObjectURL(localAudioUrlRef.current);
+        localAudioUrlRef.current = "";
+      }
+      setAudioSrc(restoredAudioUrl);
+      setAudioUploadStatus("uploaded");
+      setStatus(`이미 저장된 서버 음악을 다시 연결했습니다: ${plan.audio.fileName || file.name}`);
+      event.target.value = "";
+      return;
+    }
     if (localAudioUrlRef.current) URL.revokeObjectURL(localAudioUrlRef.current);
     const localUrl = URL.createObjectURL(file);
     localAudioUrlRef.current = localUrl;
     setAudioSrc(localUrl);
     setAudioUploadStatus("uploading");
-    setStatus("음악을 불러왔습니다. 서버에 업로드하는 중...");
+    setStatus("음악을 선택했습니다. 서버에 업로드하는 중...");
     try {
-      const audio = await uploadAudioToSupabase(file, plan?.localProjectId || plan?.title || "project");
+      const audio = await uploadAudioToSupabase(file, plan?.localProjectId || plan?.title || "project", fingerprint);
       updatePlan((current) => ({ ...current, audio }));
-      setAudioSrc(audio.publicUrl);
+      setAudioSrc(resolveAudioUrl(audio));
       setAudioUploadStatus("uploaded");
       setStatus(`음악 저장됨: ${audio.fileName}`);
       if (localAudioUrlRef.current) {
         URL.revokeObjectURL(localAudioUrlRef.current);
         localAudioUrlRef.current = "";
       }
+      event.target.value = "";
     } catch (error) {
       setAudioUploadStatus("failed");
       setStatus(`음악 업로드 실패: ${error.message}. 현재 세션에서는 재생되지만 새로고침/공유 링크에는 음악이 유지되지 않을 수 있습니다.`);
+      event.target.value = "";
+    }
+  }
+
+  function reconnectServerAudio() {
+    if (restoreAudioFromPlan(plan)) {
+      setStatus("저장된 서버 음악을 다시 연결했습니다.");
+    } else {
+      setStatus("저장된 음악 URL이 없습니다. 음악을 다시 선택해 주세요.");
     }
   }
 
@@ -1023,7 +1104,7 @@ function App() {
       setShareUrl(nextUrl);
       setStatus("공유 링크가 생성되었습니다.");
     } catch (error) {
-      setStatus(`Supabase 저장 실패: ${error.message}. JSON/PNG 백업을 사용하세요.`);
+      setStatus(`Supabase 저장 실패: ${error.message}. 안무 파일/PNG/PDF 백업을 사용하세요.`);
     }
   }
 
@@ -1041,15 +1122,16 @@ function App() {
       try {
     const loaded = JSON.parse(reader.result);
         if (!isValidPlan(loaded)) {
-          setStatus("올바른 프로젝트 JSON이 아닙니다.");
+          setStatus("올바른 안무 파일이 아닙니다.");
           return;
         }
         const normalized = normalizePlan(loaded);
         setPlan(normalized);
         setSelectedSectionId(normalized.sections[0]?.id || "");
-        setStatus("JSON 프로젝트를 불러왔습니다.");
+        const restored = restoreAudioFromPlan(normalized, { clearWhenMissing: true });
+        setStatus(restored ? "저장한 안무와 서버 음악을 불러왔습니다." : "저장한 안무를 불러왔습니다.");
       } catch {
-        setStatus("JSON 파일을 읽을 수 없습니다.");
+        setStatus("안무 파일을 읽을 수 없습니다.");
       }
     };
     reader.readAsText(file);
@@ -1137,13 +1219,14 @@ function App() {
   const frontZeroPerformers = plan.performers.filter((performer) => (counts[performer.id] || 0) === 0);
   const unnamedPerformers = plan.performers.filter((performer) => !String(performer.name || "").trim());
   const hasPngBackup = false;
-  const audioReady = Boolean(plan.audio?.publicUrl);
+  const audioUrlSaved = Boolean(resolveAudioUrl(plan.audio));
+  const audioLoadFailed = audioUploadStatus === "failed" && audioUrlSaved;
   const audioStatusText = audioUploadStatus === "uploading"
     ? "음악 업로드 중"
     : audioUploadStatus === "failed"
-      ? "음악 업로드 실패"
-      : audioReady
-        ? `음악 저장됨: ${plan.audio.fileName || "서버 음악"}`
+      ? audioUrlSaved ? "서버 음악 연결 실패" : "음악 업로드 실패"
+      : audioUrlSaved
+        ? `서버 음악 연결됨: ${plan.audio.fileName || "서버 음악"}`
         : audioSrc
           ? "로컬 음악 준비됨"
           : "음악 없음";
@@ -1152,18 +1235,30 @@ function App() {
     return (
       <nav className={`mobile-tabs ${extraClass}`.trim()}>
         {MOBILE_TABS.map(([value, label]) => (
-          <button key={value} className={mobileTab === value ? "active" : ""} onClick={() => setMobileTab(value)}>{label}</button>
+          <button
+            key={value}
+            className={activeToolTab === value ? "active" : ""}
+            onClick={() => {
+              setActiveToolTab(value);
+              setIsBottomSheetOpen(true);
+            }}
+          >
+            {label}
+          </button>
         ))}
       </nav>
     );
   }
 
-  function renderPointPanel() {
+  function renderFormationPanel() {
     return (
-      <>
+      <div className="form-stack">
         <div className="panel-head">
-          <h2>대형 지점</h2>
-          {!readonly && <button onClick={addSection}>추가</button>}
+          <div>
+            <h2>대형</h2>
+            <p className="muted">음악 시각마다 도착할 대형을 관리합니다.</p>
+          </div>
+          {!readonly && <button onClick={addSection}>현재 시간에 대형 만들기</button>}
         </div>
         <div className="section-list mobile-section-list">
           {sortedSections.map((section) => (
@@ -1188,34 +1283,58 @@ function App() {
             <button onClick={deleteSection}>삭제</button>
           </div>
         )}
-      </>
+
+        {selectedSection ? (
+          <>
+            <label>지점명<input readOnly={readonly} value={selectedSection.name} onChange={(event) => updateSection(selectedSection.id, { name: event.target.value })} /></label>
+            <div className="two-col">
+              <label>도착 시각<input readOnly={readonly} type="number" step="0.1" value={pointTime(selectedSection)} onChange={(event) => {
+                const time = parseNumber(event.target.value, pointTime(selectedSection));
+                const moveDuration = pointMoveDuration(selectedSection);
+                updateSection(selectedSection.id, { time, end: time, start: Math.max(0, time - moveDuration) });
+              }} /></label>
+              <label>이동 시간<input readOnly={readonly} type="number" min="0" step="0.1" value={pointMoveDuration(selectedSection)} onChange={(event) => {
+                const moveDuration = Math.max(0, parseNumber(event.target.value, pointMoveDuration(selectedSection)));
+                const time = pointTime(selectedSection);
+                updateSection(selectedSection.id, { moveDuration, start: Math.max(0, time - moveDuration), end: time });
+              }} /></label>
+            </div>
+            <p className="muted">이전 대형에서 이 지점까지 {pointMoveDuration(selectedSection)}초 동안 이동해 {formatTime(pointTime(selectedSection))}에 도착합니다.</p>
+            <label>메모<textarea readOnly={readonly} value={selectedSection.notes} onChange={(event) => updateSection(selectedSection.id, { notes: event.target.value })} /></label>
+          </>
+        ) : <p className="muted">대형 지점을 선택하세요.</p>}
+      </div>
     );
   }
 
-  function renderSettingsPanel() {
-    if (!selectedSection) return <p className="muted">대형 지점을 선택하세요.</p>;
+  function renderArrangePanel() {
+    const selectedPerformer = plan.performers.find((performer) => performer.id === selectedPerformerId);
     return (
       <div className="form-stack">
-        <h2>지점 설정</h2>
-        <label>지점명<input readOnly={readonly} value={selectedSection.name} onChange={(event) => updateSection(selectedSection.id, { name: event.target.value })} /></label>
-        <div className="two-col">
-          <label>도착 시각<input readOnly={readonly} type="number" step="0.1" value={pointTime(selectedSection)} onChange={(event) => {
-            const time = parseNumber(event.target.value, pointTime(selectedSection));
-            const moveDuration = pointMoveDuration(selectedSection);
-            updateSection(selectedSection.id, { time, end: time, start: Math.max(0, time - moveDuration) });
-          }} /></label>
-          <label>이동 시간<input readOnly={readonly} type="number" min="0" step="0.1" value={pointMoveDuration(selectedSection)} onChange={(event) => {
-            const moveDuration = Math.max(0, parseNumber(event.target.value, pointMoveDuration(selectedSection)));
-            const time = pointTime(selectedSection);
-            updateSection(selectedSection.id, { moveDuration, start: Math.max(0, time - moveDuration), end: time });
-          }} /></label>
+        <div className="panel-head">
+          <div>
+            <h2>배치</h2>
+            <p className="muted">무대 위 토큰, 커플, 격자 맞춤을 조작합니다.</p>
+          </div>
+          <button className={snapEnabled ? "toggle active" : "toggle"} onClick={() => setSnapEnabled((value) => !value)}>
+            격자 맞춤 {snapEnabled ? "ON" : "OFF"}
+          </button>
         </div>
-        <p className="muted">이전 대형에서 이 지점까지 {pointMoveDuration(selectedSection)}초 동안 이동해 {formatTime(pointTime(selectedSection))}에 도착합니다.</p>
-        <label>메모<textarea readOnly={readonly} value={selectedSection.notes} onChange={(event) => updateSection(selectedSection.id, { notes: event.target.value })} /></label>
+        <div className="tool-card">
+          <strong>현재 선택</strong>
+          <span>{selectedPerformer ? `${selectedPerformer.name || selectedPerformer.label} 토큰` : selectedPairKey ? "선택 커플" : "선택 없음"}</span>
+          <p className="muted">토큰을 드래그해 배치하고, 다른 토큰과 겹치게 놓으면 커플로 연결됩니다. 다이아몬드 핸들을 드래그하면 커플이 함께 이동합니다.</p>
+        </div>
+        <div className="row-actions">
+          <button className={isStageFocus ? "toggle active" : "toggle"} onClick={() => setIsStageFocus((value) => !value)}>
+            {isStageFocus ? "패널 보기" : "무대 크게 보기"}
+          </button>
+          <button onClick={() => exportPng()}>현재 PNG</button>
+        </div>
         <div className="partner-box">
           <div className="panel-head">
-            <h3>파트너</h3>
-            {!readonly && <button onClick={addPair}>페어 추가</button>}
+            <h3>커플</h3>
+            {!readonly && <button onClick={addPair}>직접 커플 추가</button>}
           </div>
           {selectedPairKey && !readonly && (
             <button className="danger-button" onClick={() => removePairByKey(selectedPairKey)}>선택 커플 해제</button>
@@ -1297,8 +1416,8 @@ function App() {
             이름 미입력 {unnamedPerformers.length ? `${unnamedPerformers.length}명` : "없음"}
           </span>
           <span className={shareUrl ? "check ok" : "check neutral"}>공유 링크 {shareUrl ? "생성됨" : "미생성"}</span>
-          <span className={audioReady ? "check ok" : audioUploadStatus === "failed" ? "check warn" : "check neutral"}>
-            {audioReady ? "음악 포함 공유 준비됨" : audioUploadStatus === "failed" ? "음악 업로드 실패" : "음악 미포함"}
+          <span className={audioLoadFailed ? "check warn" : audioUrlSaved ? "check ok" : audioUploadStatus === "failed" ? "check warn" : "check neutral"}>
+            {audioLoadFailed ? "음악 로드 실패" : audioUrlSaved ? "음악 URL 저장됨" : audioUploadStatus === "failed" ? "음악 업로드 실패" : "음악 미포함"}
           </span>
           <span className={hasPngBackup ? "check ok" : "check neutral"}>PNG/PDF 백업은 버튼으로 즉시 저장</span>
         </div>
@@ -1311,22 +1430,30 @@ function App() {
 
         {!readonly && (
           <div className="backup-actions">
-            <button className="tertiary" onClick={exportJson}>백업 JSON 저장</button>
-            <label className="file-button tertiary">백업 JSON 열기<input type="file" accept="application/json" onChange={importJson} /></label>
+            <button className="tertiary" onClick={exportJson}>이 안무 저장하기</button>
+            <label className="file-button tertiary">저장한 안무 열기<input type="file" accept="application/json" onChange={importJson} /></label>
           </div>
         )}
 
-        <p className="muted">공유 링크 저장이 실패하면 PNG/PDF/JSON으로 대신 공유할 수 있습니다. 음악은 public URL로 저장되어 링크를 아는 사람이 접근할 수 있습니다.</p>
+        <p className="muted">공유 링크 저장이 실패하면 이 안무 저장하기 또는 PNG/PDF로 대신 공유할 수 있습니다. 안무 파일은 .json 형식으로 저장되며, 음악은 public URL로 저장되어 링크를 아는 사람이 접근할 수 있습니다.</p>
       </div>
     );
   }
 
-  function renderMobileTabContent() {
-    if (mobileTab === "points") return renderPointPanel();
-    if (mobileTab === "settings") return renderSettingsPanel();
-    if (mobileTab === "performers") return renderPerformersPanel();
+  function renderToolPanelContent() {
+    if (activeToolTab === "formations") return renderFormationPanel();
+    if (activeToolTab === "arrange") return renderArrangePanel();
+    if (activeToolTab === "performers") return renderPerformersPanel();
     return renderSharePanel();
   }
+
+  const activeToolLabel = MOBILE_TABS.find(([value]) => value === activeToolTab)?.[1] || "대형";
+  const selectedPerformer = plan.performers.find((performer) => performer.id === selectedPerformerId);
+  const selectedStateText = selectedPairKey
+    ? "커플 선택됨"
+    : selectedPerformer
+      ? `${selectedPerformer.name || selectedPerformer.label} 선택됨`
+      : "선택 없음";
 
   return (
     <div className={isStageFocus ? "app stage-focus" : "app"}>
@@ -1349,36 +1476,6 @@ function App() {
       {status && <div className="status">{status} {shareUrl && <a href={shareUrl}>{shareUrl}</a>}</div>}
 
       <main className="workspace">
-        <aside className="sections-panel">
-          <div className="panel-head">
-            <h2>대형 지점</h2>
-            {!readonly && <button onClick={addSection}>추가</button>}
-          </div>
-          <div className="section-list">
-            {sortedSections.map((section) => (
-              <button
-                key={section.id}
-                className={[
-                  "section-item",
-                  section.id === selectedSection?.id ? "active" : "",
-                  section.id === sortedSections[timeSectionIndex]?.id ? "current-time" : ""
-                ].filter(Boolean).join(" ")}
-                onClick={() => jumpTo(section)}
-              >
-                <strong>{section.name}</strong>
-                <span>도착 {formatTime(pointTime(section))}</span>
-                <em>{pointMoveDuration(section) > 0 ? `${pointMoveDuration(section)}초 이동` : "즉시/고정"}</em>
-              </button>
-            ))}
-          </div>
-          {!readonly && (
-            <div className="row-actions">
-              <button onClick={duplicateSection}>복제</button>
-              <button onClick={deleteSection}>삭제</button>
-            </div>
-          )}
-        </aside>
-
         <section className="stage-area">
           <div className="stage-toolbar">
             <div>
@@ -1387,14 +1484,15 @@ function App() {
             </div>
             <div className="row-actions">
               <button className={snapEnabled ? "toggle active" : "toggle"} onClick={() => setSnapEnabled((value) => !value)}>
-                스냅 {snapEnabled ? "ON" : "OFF"}
+                격자 맞춤 {snapEnabled ? "ON" : "OFF"}
               </button>
               <button className={isStageFocus ? "toggle active" : "toggle"} onClick={() => setIsStageFocus((value) => !value)}>
-                {isStageFocus ? "패널 보기" : "무대 집중"}
+                {isStageFocus ? "패널 보기" : "무대 크게 보기"}
               </button>
               <button onClick={() => exportPng()}>현재 PNG</button>
             </div>
           </div>
+          {!readonly && <p className="stage-hint">음악 재생 → 현재 시간에 대형 만들기 → 무대에서 토큰 배치</p>}
           <svg ref={svgRef} className="stage" viewBox="0 0 100 100">
             <defs>
               <marker id="arrow-live" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
@@ -1512,11 +1610,13 @@ function App() {
               );
             })}
           </svg>
-          <div className="transport">
+          <div className={audioLoadFailed ? "transport has-reconnect" : "transport"}>
             <label className="file-button secondary audio-load">
-              {audioUploadStatus === "uploading" ? "업로드 중..." : "음악 불러오기"}
+              {audioUploadStatus === "uploading" ? "업로드 중..." : audioUrlSaved ? "음악 교체" : "음악 업로드"}
               <input type="file" accept="audio/*" onChange={handleAudioFile} />
             </label>
+            {audioLoadFailed && <button className="secondary reconnect-button" onClick={reconnectServerAudio}>서버 음악 다시 연결</button>}
+            {!readonly && <button className="secondary capture-button" onClick={addSection}>현재 시간에 대형 만들기</button>}
             <button className="primary" onClick={togglePlayback}>
               {isPlaying ? "정지" : "재생"}
             </button>
@@ -1552,107 +1652,58 @@ function App() {
                 setIsPlaying(false);
                 syncAudioTime();
               }}
+              onError={() => {
+                const fallbackUrl = audioUrlCandidates(plan.audio).find((url) => url !== audioSrc);
+                if (fallbackUrl) {
+                  setAudioSrc(fallbackUrl);
+                  setAudioUploadStatus("uploaded");
+                  setStatus("저장된 Storage 경로로 음악을 다시 연결합니다.");
+                  return;
+                }
+                setAudioUploadStatus(plan.audio?.storagePath || plan.audio?.publicUrl ? "failed" : "idle");
+                setStatus("음악 URL을 불러오지 못했습니다. 다시 음악을 불러오세요.");
+              }}
             />
             <span className="time-readout">{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
           </div>
         </section>
 
-        <aside className="details-panel">
-          <h2>대형 지점 정보</h2>
-          {selectedSection && (
-            <div className="form-stack">
-              <label>지점명<input readOnly={readonly} value={selectedSection.name} onChange={(event) => updateSection(selectedSection.id, { name: event.target.value })} /></label>
-              <div className="two-col">
-                <label>도착 시각<input readOnly={readonly} type="number" step="0.1" value={pointTime(selectedSection)} onChange={(event) => {
-                  const time = parseNumber(event.target.value, pointTime(selectedSection));
-                  const moveDuration = pointMoveDuration(selectedSection);
-                  updateSection(selectedSection.id, { time, end: time, start: Math.max(0, time - moveDuration) });
-                }} /></label>
-                <label>이동 시간<input readOnly={readonly} type="number" min="0" step="0.1" value={pointMoveDuration(selectedSection)} onChange={(event) => {
-                  const moveDuration = Math.max(0, parseNumber(event.target.value, pointMoveDuration(selectedSection)));
-                  const time = pointTime(selectedSection);
-                  updateSection(selectedSection.id, { moveDuration, start: Math.max(0, time - moveDuration), end: time });
-                }} /></label>
-              </div>
-              <p className="muted">이전 대형에서 이 지점까지 {pointMoveDuration(selectedSection)}초 동안 이동해 {formatTime(pointTime(selectedSection))}에 도착합니다.</p>
-              <label>메모<textarea readOnly={readonly} value={selectedSection.notes} onChange={(event) => updateSection(selectedSection.id, { notes: event.target.value })} /></label>
-              <div className="partner-box">
-                <div className="panel-head">
-                  <h3>파트너</h3>
-                  {!readonly && <button onClick={addPair}>페어 추가</button>}
-                </div>
-                {selectedPairKey && !readonly && (
-                  <button className="danger-button" onClick={() => removePairByKey(selectedPairKey)}>선택 커플 해제</button>
-                )}
-                {(partnerSet?.pairs || []).map((pair, index) => (
-                  <div className={selectedPairKey === pairKey(pair) ? "pair-row active" : "pair-row"} key={index} onClick={() => setSelectedPairKey(pairKey(pair))}>
-                    <select disabled={readonly} value={pair[0]} onChange={(event) => updatePair(index, 0, event.target.value)}>
-                      {plan.performers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
-                    <span>-</span>
-                    <select disabled={readonly} value={pair[1]} onChange={(event) => updatePair(index, 1, event.target.value)}>
-                      {plan.performers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
-                  </div>
-                ))}
-                {!(partnerSet?.pairs || []).length && <p className="muted">토큰을 다른 토큰 가까이 드래그해 파트너를 연결하세요.</p>}
-              </div>
-            </div>
-          )}
+        <aside className="tool-inspector">
+          <div className="inspector-now">
+            <span>현재 작업</span>
+            <strong>{selectedSection?.name || activeSection?.name || "대형 없음"}</strong>
+            <em>{formatTime(sliderTime)} · 도착 {selectedSection ? formatTime(pointTime(selectedSection)) : "0:00.0"} · 이동 {selectedSection ? pointMoveDuration(selectedSection) : 0}초</em>
+            <em>{selectedStateText}</em>
+          </div>
+          {renderMobileTabs("inspector-tabs")}
+          <div className="inspector-panel">
+            {renderToolPanelContent()}
+          </div>
         </aside>
         <aside className="landscape-tools">
           {renderMobileTabs("mobile-tabs-rail")}
           <div className="mobile-panel landscape-panel">
-            {renderMobileTabContent()}
+            {renderToolPanelContent()}
           </div>
         </aside>
       </main>
 
-      <section className="bottom-grid">
-        <div className="card">
-          <h2>출연자 / 앞줄 노출</h2>
-          <div className="performer-grid">
-            {plan.performers.map((performer) => {
-              const count = counts[performer.id] || 0;
-              return (
-                <div key={performer.id} className={selectedPerformerId === performer.id ? "performer active" : "performer"} onClick={() => setSelectedPerformerId(performer.id)}>
-                  <span style={{ background: performer.color }}>{performer.label}</span>
-                  <input
-                    readOnly={readonly}
-                    value={performer.name}
-                    onChange={(event) => updatePlan((current) => ({
-                      ...current,
-                      performers: current.performers.map((p) => p.id === performer.id ? { ...p, name: event.target.value } : p)
-                    }))}
-                  />
-                  <em className={count === 0 ? "danger" : count > 1 ? "good" : "ok"}>{count}회</em>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        <div className="card print-card">
-          <h2>개인 경로</h2>
-          {selectedPerformerId ? (
-            <ol className="path-list">
-              {sortedSections.map((section) => {
-                const performer = plan.performers.find((p) => p.id === selectedPerformerId);
-                const pos = section.positions?.[selectedPerformerId];
-                return <li key={section.id}><strong>{section.name}</strong> {performer?.name}: x {pos?.x.toFixed(0)}, y {pos?.y.toFixed(0)} / {formatTime(section.start)}-{formatTime(section.end)}</li>;
-              })}
-            </ol>
-          ) : <p className="muted">토큰을 클릭하면 그 사람의 이동 흐름만 따로 볼 수 있습니다.</p>}
-        </div>
-        <div className="card share-card">
-          {renderSharePanel()}
-        </div>
-      </section>
-
       <section className="mobile-editor">
         {renderMobileTabs()}
-        <div className="mobile-panel">
-          {renderMobileTabContent()}
-        </div>
+        {isBottomSheetOpen && (
+          <div className={isBottomSheetExpanded ? "mobile-bottom-sheet expanded" : "mobile-bottom-sheet"}>
+            <div className="bottom-sheet-head">
+              <strong>{activeToolLabel}</strong>
+              <div className="row-actions">
+                <button onClick={() => setIsBottomSheetExpanded((value) => !value)}>{isBottomSheetExpanded ? "축소" : "확장"}</button>
+                <button onClick={() => setIsBottomSheetOpen(false)}>닫기</button>
+              </div>
+            </div>
+            <div className="mobile-panel">
+              {renderToolPanelContent()}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="print-sheets">
