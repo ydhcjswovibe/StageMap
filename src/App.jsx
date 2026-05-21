@@ -1226,6 +1226,29 @@ function App() {
     if (performerPair) {
       const [firstId, secondId] = performerPair;
       const wasSelectedPair = selectedPairKey === pairKey(performerPair);
+      if (wasSelectedPair) {
+        dragStateRef.current = {
+          mode: "token-move",
+          source: "selected-pair-member",
+          performerId,
+          sectionId: selectedSection.id,
+          pointerId: event.pointerId,
+          individual: true,
+          sourcePair: [...performerPair],
+          offsetX: token.x - pointer.x,
+          offsetY: token.y - pointer.y,
+          pointer,
+          startPointer: pointer,
+          moved: false,
+          finalPositions: {
+            [performerId]: token
+          }
+        };
+        setSelectedPairKey("");
+        setDragPositions({ [performerId]: token });
+        setDragHint("드래그하면 커플 해제");
+        return;
+      }
       const firstStart = { ...(selectedSection.positions[firstId] || { x: pointer.x, y: pointer.y }) };
       const secondStart = { ...(selectedSection.positions[secondId] || { x: pointer.x, y: pointer.y }) };
       dragStateRef.current = {
@@ -1369,12 +1392,14 @@ function App() {
       return;
     }
     if (drag?.mode === "token-move") {
-      const action = resolveDropAction({
-        drag,
-        connectCandidate: drag.candidateId ? { id: drag.candidateId } : null,
-        swapCandidate: drag.swapCandidate
-      });
-      commitDropAction(action, drag);
+      if (drag.moved) {
+        const action = resolveDropAction({
+          drag,
+          connectCandidate: drag.candidateId ? { id: drag.candidateId } : null,
+          swapCandidate: drag.swapCandidate
+        });
+        commitDropAction(action, drag);
+      }
     }
     setMagnetCandidateId("");
     setDragHint("");
