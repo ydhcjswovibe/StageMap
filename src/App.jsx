@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { resolveDropAction } from "./dragPolicy.mjs";
 import { createProjectJsonDownload } from "./projectJson.mjs";
 
 const STORAGE_KEY = "choreo-stage-planner-project";
@@ -34,6 +35,7 @@ const MAGNET_DISTANCE = 4.8;
 const TOKEN_RADIUS = 4.2;
 const SELECTED_RING_RADIUS = 5.35;
 const COUPLE_GAP = 8.8;
+const COUPLE_PULL_OUT_DISTANCE = 6.4;
 const GRID_X = [14.8, 23.6, 32.4, 41.2, 50, 58.8, 67.6, 76.4, 85.2];
 const GRID_Y = [10.8, 19.6, 28.4, 37.2, 46, 54.8, 63.6, 72.4, 81.2, 90];
 
@@ -652,6 +654,7 @@ function App() {
   const audioRef = useRef(null);
   const svgRef = useRef(null);
   const dragStateRef = useRef(null);
+  const ignoreNextStageTapRef = useRef(false);
   const longPressTimerRef = useRef(null);
   const localAudioUrlRef = useRef("");
 
@@ -873,6 +876,16 @@ function App() {
     };
   }
 
+  function captureStagePointer(event) {
+    const target = svgRef.current || event.currentTarget;
+    if (!target?.setPointerCapture) return;
+    try {
+      target.setPointerCapture(event.pointerId);
+    } catch {
+      // Browser may reject capture if the pointer was already released.
+    }
+  }
+
   function getPartnerSetForSection(section) {
     return plan.partnerSets.find((set) => set.id === section?.partnerSetId);
   }
@@ -885,12 +898,11 @@ function App() {
     return plan.performers.find((performer) => performer.id === performerId);
   }
 
-  function findMagnetCandidate(performerId, nextPosition, positions, pairs = []) {
-    const existingPair = pairs.find((pair) => pair.includes(performerId));
+  function findIndependentMagnetCandidate(performerId, nextPosition, positions, pairs = []) {
     let nearest = null;
     plan.performers.forEach((performer) => {
       if (performer.id === performerId) return;
-      if (existingPair?.includes(performer.id)) return;
+      if (pairs.some((pair) => pair.includes(performer.id))) return;
       const pos = positions?.[performer.id];
       if (!pos) return;
       const gap = distance(nextPosition, pos);
@@ -968,12 +980,15 @@ function App() {
         ...baseSet.pairs.filter((pair) => !pair.includes(firstId) && !pair.includes(secondId)),
         [firstId, secondId]
       ];
-      const nextPositions = center
-        ? {
-            ...section.positions,
-            ...horizontalCouplePositions(current, firstId, secondId, center)
-          }
-        : section.positions;
+      const firstPosition = section.positions?.[firstId];
+      const secondPosition = section.positions?.[secondId];
+      const pairCenter = center || (firstPosition && secondPosition
+        ? { x: (firstPosition.x + secondPosition.x) / 2, y: (firstPosition.y + secondPosition.y) / 2 }
+        : firstPosition || secondPosition || { x: 50, y: 50 });
+      const nextPositions = {
+        ...section.positions,
+        ...horizontalCouplePositions(current, firstId, secondId, snapPoint(pairCenter, snapEnabled))
+      };
       return {
         ...current,
         partnerSets: existing
@@ -984,6 +999,109 @@ function App() {
     });
     setSelectedPairKey(pairKey([firstId, secondId]));
     setStatus("파트너가 연결되었습니다.");
+  }
+
+  function commitDropAction(action, drag) {
+    if (!action || action.type === "none") return;
+    updatePlan((current) => {
+      const section = current.sections.find((item) => item.id === drag.sectionId);
+      if (!section) return current;
+      const basePositions = { ...section.positions, ...(action.positions || {}) };
+
+      if (action.type === "connect-pair") {
+        const setId = section.partnerSetId || uid("partners");
+        const existing = current.partnerSets.find((set) => set.id === setId);
+        const baseSet = existing || { id: setId, name: `${section.name} 파트너`, pairs: [] };
+        const dragged = basePositions[action.performerId];
+        const target = basePositions[action.targetId] || section.positions[action.targetId];
+        const center = dragged && target
+          ? snapPoint({ x: (dragged.x + target.x) / 2, y: (dragged.y + target.y) / 2 }, snapEnabled)
+          : drag.pointer;
+        const nextPositions = {
+          ...basePositions,
+          ...horizontalCouplePositions(current, action.performerId, action.targetId, center)
+        };
+        const pairs = [
+          ...baseSet.pairs.filter((pair) => !pair.includes(action.performerId) && !pair.includes(action.targetId)),
+          [action.performerId, action.targetId]
+        ];
+        return {
+          ...current,
+          partnerSets: existing
+            ? current.partnerSets.map((set) => set.id === setId ? { ...set, pairs } : set)
+            : [...current.partnerSets, { ...baseSet, pairs }],
+          sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, partnerSetId: setId, positions: nextPositions } : item)
+        };
+      }
+
+      if (action.type === "swap-same-role") {
+        const setId = section.partnerSetId;
+        const currentSet = current.partnerSets.find((set) => set.id === setId);
+        const sourcePairIndex = currentSet?.pairs?.findIndex((pair) => pair.includes(action.performerId)) ?? -1;
+        const targetPairIndex = currentSet?.pairs?.findIndex((pair) => pair.includes(action.targetId)) ?? -1;
+        if (!setId || sourcePairIndex < 0 || targetPairIndex < 0 || sourcePairIndex === targetPairIndex) {
+          return {
+            ...current,
+            sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, positions: basePositions } : item)
+          };
+        }
+        const nextPairs = currentSet.pairs.map((pair, index) => {
+          if (index === sourcePairIndex) return pair.map((id) => id === action.performerId ? action.targetId : id);
+          if (index === targetPairIndex) return pair.map((id) => id === action.targetId ? action.performerId : id);
+          return pair;
+        });
+        const centerForPair = (pair) => {
+          const pairPositions = pair.map((id) => section.positions?.[id]).filter(Boolean);
+          if (!pairPositions.length) return { x: 50, y: 50 };
+          return {
+            x: pairPositions.reduce((sum, pos) => sum + pos.x, 0) / pairPositions.length,
+            y: pairPositions.reduce((sum, pos) => sum + pos.y, 0) / pairPositions.length
+          };
+        };
+        const sourcePair = nextPairs[sourcePairIndex];
+        const targetPair = nextPairs[targetPairIndex];
+        const nextPositions = {
+          ...basePositions,
+          ...horizontalCouplePositions(current, sourcePair[0], sourcePair[1], centerForPair(currentSet.pairs[sourcePairIndex])),
+          ...horizontalCouplePositions(current, targetPair[0], targetPair[1], centerForPair(currentSet.pairs[targetPairIndex]))
+        };
+        return {
+          ...current,
+          partnerSets: current.partnerSets.map((set) => {
+            if (set.id !== setId) return set;
+            return {
+              ...set,
+              pairs: nextPairs
+            };
+          }),
+          sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, positions: nextPositions } : item)
+        };
+      }
+
+      const sourcePairKey = action.sourcePair ? pairKey(action.sourcePair) : "";
+      return {
+        ...current,
+        partnerSets: sourcePairKey && section.partnerSetId
+          ? current.partnerSets.map((set) => set.id === section.partnerSetId
+            ? { ...set, pairs: set.pairs.filter((pair) => pairKey(pair) !== sourcePairKey) }
+            : set)
+          : current.partnerSets,
+        sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, positions: basePositions } : item)
+      };
+    });
+
+    if (action.type === "connect-pair") {
+      setSelectedPairKey(pairKey([action.performerId, action.targetId]));
+      setStatus("파트너가 연결되었습니다.");
+    } else if (action.type === "swap-same-role") {
+      const source = performerById(action.performerId);
+      const target = performerById(action.targetId);
+      setSelectedPairKey("");
+      setStatus(`${source?.name || source?.label || "출연자"}와 ${target?.name || target?.label || "출연자"}를 교체했습니다.`);
+    } else if (action.sourcePair) {
+      setSelectedPairKey("");
+      setStatus("커플을 해제하고 토큰을 이동했습니다.");
+    }
   }
 
   function removePairByKey(targetKey) {
@@ -1096,7 +1214,8 @@ function App() {
   function onStagePointerDown(event, performerId) {
     if (readonly || !selectedSection) return;
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    ignoreNextStageTapRef.current = false;
+    captureStagePointer(event);
     setSelectedPerformerId(performerId);
     setSelectedPairKey("");
     setIsBottomSheetExpanded(false);
@@ -1104,14 +1223,16 @@ function App() {
     const token = selectedSection.positions?.[performerId] || { x: pointer.x, y: pointer.y };
     const partnerSet = getPartnerSetForSection(selectedSection);
     const performerPair = pairForPerformer(partnerSet?.pairs || [], performerId);
-    if (performerPair && !event.altKey) {
+    if (performerPair) {
       const [firstId, secondId] = performerPair;
+      const wasSelectedPair = selectedPairKey === pairKey(performerPair);
       const firstStart = { ...(selectedSection.positions[firstId] || { x: pointer.x, y: pointer.y }) };
       const secondStart = { ...(selectedSection.positions[secondId] || { x: pointer.x, y: pointer.y }) };
       dragStateRef.current = {
-        type: "pair",
+        mode: "pair-move",
         source: "token",
         draggedPerformerId: performerId,
+        canPullOutMember: wasSelectedPair,
         pair: [...performerPair],
         sectionId: selectedSection.id,
         pointerId: event.pointerId,
@@ -1130,32 +1251,20 @@ function App() {
       setSelectedPairKey(pairKey(performerPair));
       setDragPositions(dragStateRef.current.finalPositions);
       clearLongPressTimer();
-      longPressTimerRef.current = setTimeout(() => {
-        const drag = dragStateRef.current;
-        if (!drag || drag.type !== "pair" || drag.pointerId !== event.pointerId || drag.moved || drag.sectionId !== selectedSection.id) return;
-        const currentToken = drag.startPositions[performerId] || token;
-        drag.type = "token";
-        drag.performerId = performerId;
-        drag.individualAdjust = true;
-        drag.sourcePair = [...performerPair];
-        drag.offsetX = currentToken.x - drag.pointer.x;
-        drag.offsetY = currentToken.y - drag.pointer.y;
-        drag.finalPositions = { [performerId]: currentToken };
-        setDragPositions(drag.finalPositions);
-        setDragHint("개별 조정 중");
-      }, 450);
       return;
     }
     dragStateRef.current = {
-      type: "token",
+      mode: "token-move",
       performerId,
       sectionId: selectedSection.id,
       pointerId: event.pointerId,
-      individualAdjust: Boolean(performerPair && event.altKey),
+      individual: false,
       sourcePair: performerPair ? [...performerPair] : null,
       offsetX: token.x - pointer.x,
       offsetY: token.y - pointer.y,
       pointer,
+      startPointer: pointer,
+      moved: false,
       finalPositions: {
         [performerId]: token
       }
@@ -1163,24 +1272,63 @@ function App() {
     setDragPositions({ [performerId]: token });
   }
 
-  function onStagePointerMove(event, performerId) {
+  function shouldPullOutPairMember(drag, pointer) {
+    if (!drag.canPullOutMember || drag.source !== "token" || !drag.draggedPerformerId) return false;
+    const memberStart = drag.startPositions?.[drag.draggedPerformerId];
+    const partnerId = drag.pair?.find((id) => id !== drag.draggedPerformerId);
+    const partnerStart = partnerId ? drag.startPositions?.[partnerId] : null;
+    if (!memberStart || !partnerStart) return false;
+    const basePointer = drag.startPointer || drag.pointer;
+    const currentMember = {
+      x: memberStart.x + pointer.x - basePointer.x,
+      y: memberStart.y + pointer.y - basePointer.y
+    };
+    return distance(currentMember, partnerStart) - distance(memberStart, partnerStart) >= COUPLE_PULL_OUT_DISTANCE;
+  }
+
+  function convertPairDragToMemberPullOut(drag, pointer) {
+    const performerId = drag.draggedPerformerId;
+    const currentToken = drag.startPositions?.[performerId];
+    const basePointer = drag.startPointer || drag.pointer;
+    if (!performerId || !currentToken || !basePointer) return;
+    drag.mode = "token-move";
+    drag.performerId = performerId;
+    drag.individual = true;
+    drag.sourcePair = [...(drag.pair || [])];
+    drag.offsetX = currentToken.x - basePointer.x;
+    drag.offsetY = currentToken.y - basePointer.y;
+    drag.pointer = pointer;
+    drag.startPointer = basePointer;
+    drag.moved = true;
+    drag.finalPositions = { [performerId]: currentToken };
+    setSelectedPairKey("");
+    setDragHint("놓으면 커플 해제");
+  }
+
+  function onStagePointerMove(event) {
     if (readonly || !selectedSection) return;
     const drag = dragStateRef.current;
     if (!drag || drag.sectionId !== selectedSection.id || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
-    if (drag.type === "pair") {
-      if (drag.draggedPerformerId !== performerId) return;
-      const pointer = clientToStagePoint(event);
+    const pointer = clientToStagePoint(event);
+    if (drag.mode === "pair-move") {
       if (distance(pointer, drag.startPointer || drag.pointer) > 0.8) {
         drag.moved = true;
         clearLongPressTimer();
       }
-      updatePairDrag(event, drag, pointer);
-      return;
+      if (shouldPullOutPairMember(drag, pointer)) {
+        convertPairDragToMemberPullOut(drag, pointer);
+      } else {
+        updatePairDrag(event, drag, pointer);
+        return;
+      }
     }
-    if (drag.performerId !== performerId) return;
+    const performerId = drag.performerId;
+    if (!performerId) return;
     clearLongPressTimer();
-    const pointer = clientToStagePoint(event);
+    if (distance(pointer, drag.startPointer || drag.pointer) > 0.8) {
+      drag.moved = true;
+    }
     const rawPosition = {
       x: clamp(pointer.x + drag.offsetX, 4, 96),
       y: clamp(pointer.y + drag.offsetY, 5, 95)
@@ -1191,18 +1339,19 @@ function App() {
       y: clamp(snapped.y, 5, 95)
     };
     const partnerSet = getPartnerSetForSection(selectedSection);
+    const pairs = partnerSet?.pairs || [];
     const nextPositions = { ...selectedSection.positions, [performerId]: nextPosition };
-    const swapCandidate = drag.individualAdjust
-      ? findSameRoleSwapCandidate(performerId, nextPosition, nextPositions, partnerSet?.pairs || [])
+    const swapCandidate = drag.individual && drag.sourcePair
+      ? findSameRoleSwapCandidate(performerId, nextPosition, nextPositions, pairs)
       : null;
-    const candidateId = swapCandidate?.targetId || findMagnetCandidate(performerId, nextPosition, nextPositions, partnerSet?.pairs || []);
+    const candidateId = swapCandidate?.targetId || findIndependentMagnetCandidate(performerId, nextPosition, nextPositions, pairs);
     drag.candidateId = candidateId;
     drag.swapCandidate = swapCandidate;
     drag.pointer = pointer;
     drag.finalPositions = { [performerId]: nextPosition };
     setDragHint(swapCandidate
       ? `놓으면 ${(performerById(swapCandidate.targetId)?.name || performerById(swapCandidate.targetId)?.label || "대상")}와 교체`
-      : drag.individualAdjust
+      : drag.individual
         ? "개별 조정 중"
         : candidateId
           ? "놓으면 파트너 연결"
@@ -1214,35 +1363,18 @@ function App() {
   function finishTokenDrag() {
     clearLongPressTimer();
     const drag = dragStateRef.current;
-    if (drag?.type === "pair") {
+    if (drag?.moved) ignoreNextStageTapRef.current = true;
+    if (drag?.mode === "pair-move") {
       finishPairDrag();
       return;
     }
-    if (drag?.type === "token" && drag.finalPositions) {
-      updatePlan((current) => ({
-        ...current,
-        sections: current.sections.map((section) => {
-          if (section.id !== drag.sectionId) return section;
-          return {
-            ...section,
-            positions: {
-              ...section.positions,
-              ...drag.finalPositions
-            }
-          };
-        })
-    }));
-    }
-    const candidateId = drag?.candidateId || magnetCandidateId;
-    if (drag?.type === "token" && drag.swapCandidate?.targetId) {
-      swapSameRolePair(drag.sectionId, drag.performerId, drag.swapCandidate.targetId);
-    } else if (drag?.type === "token" && candidateId) {
-      const dragged = drag.finalPositions?.[drag.performerId] || selectedSection?.positions?.[drag.performerId];
-      const target = selectedSection?.positions?.[candidateId];
-      const center = dragged && target
-        ? { x: (dragged.x + target.x) / 2, y: (dragged.y + target.y) / 2 }
-        : drag.pointer;
-      connectPair(drag.sectionId, drag.performerId, candidateId, snapPoint(center, snapEnabled));
+    if (drag?.mode === "token-move") {
+      const action = resolveDropAction({
+        drag,
+        connectCandidate: drag.candidateId ? { id: drag.candidateId } : null,
+        swapCandidate: drag.swapCandidate
+      });
+      commitDropAction(action, drag);
     }
     setMagnetCandidateId("");
     setDragHint("");
@@ -1258,23 +1390,22 @@ function App() {
     dragStateRef.current = null;
   }
 
+  function finishActiveDrag() {
+    const drag = dragStateRef.current;
+    if (drag?.mode === "pair-move") {
+      finishPairDrag();
+      return;
+    }
+    finishTokenDrag();
+  }
+
   function finishPairDrag() {
     clearLongPressTimer();
     const drag = dragStateRef.current;
-    if (drag?.type === "pair" && drag.finalPositions) {
-      updatePlan((current) => ({
-        ...current,
-        sections: current.sections.map((section) => {
-          if (section.id !== drag.sectionId) return section;
-          return {
-            ...section,
-            positions: {
-              ...section.positions,
-              ...drag.finalPositions
-            }
-          };
-        })
-      }));
+    if (drag?.moved) ignoreNextStageTapRef.current = true;
+    if (drag?.mode === "pair-move" && drag.finalPositions) {
+      const action = resolveDropAction({ drag });
+      commitDropAction(action, drag);
     }
     setDragPositions(null);
     setDragHint("");
@@ -1285,18 +1416,21 @@ function App() {
     if (readonly || !selectedSection) return;
     event.preventDefault();
     event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    ignoreNextStageTapRef.current = false;
+    captureStagePointer(event);
     clearLongPressTimer();
     setIsBottomSheetExpanded(false);
     const pointer = clientToStagePoint(event);
     const [firstId, secondId] = pair;
     dragStateRef.current = {
-      type: "pair",
+      mode: "pair-move",
       pairIndex,
       pair: [...pair],
       sectionId: selectedSection.id,
       pointerId: event.pointerId,
       pointer,
+      startPointer: pointer,
+      moved: false,
       startPositions: {
         [firstId]: { ...selectedSection.positions[firstId] },
         [secondId]: { ...selectedSection.positions[secondId] }
@@ -1341,12 +1475,85 @@ function App() {
     return drag.finalPositions;
   }
 
-  function onPairPointerMove(event) {
-    if (readonly) return;
-    const drag = dragStateRef.current;
-    if (!drag || drag.type !== "pair" || drag.sectionId !== selectedSection?.id || drag.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    updatePairDrag(event, drag);
+  function positionsForPairCenter(pair, center) {
+    const [firstId, secondId] = pair;
+    const firstStart = selectedSection?.positions?.[firstId];
+    const secondStart = selectedSection?.positions?.[secondId];
+    if (!firstStart || !secondStart) return null;
+    const startCenter = {
+      x: (firstStart.x + secondStart.x) / 2,
+      y: (firstStart.y + secondStart.y) / 2
+    };
+    let dx = center.x - startCenter.x;
+    let dy = center.y - startCenter.y;
+    const minX = Math.min(firstStart.x, secondStart.x);
+    const maxX = Math.max(firstStart.x, secondStart.x);
+    const minY = Math.min(firstStart.y, secondStart.y);
+    const maxY = Math.max(firstStart.y, secondStart.y);
+    dx = clamp(dx, 4 - minX, 96 - maxX);
+    dy = clamp(dy, 5 - minY, 95 - maxY);
+    return {
+      [firstId]: { x: firstStart.x + dx, y: firstStart.y + dy },
+      [secondId]: { x: secondStart.x + dx, y: secondStart.y + dy }
+    };
+  }
+
+  function handleStageTap(event) {
+    if (readonly || !selectedSection) return;
+    if (ignoreNextStageTapRef.current) {
+      ignoreNextStageTapRef.current = false;
+      return;
+    }
+    if (dragStateRef.current) return;
+    if (event.target.closest?.(".token, .pair-handle, .pair-link")) return;
+    const pointer = clientToStagePoint(event);
+    const targetPoint = snapPoint(pointer, snapEnabled);
+    const partnerSet = getPartnerSetForSection(selectedSection);
+    const selectedPair = (partnerSet?.pairs || []).find((pair) => pairKey(pair) === selectedPairKey)
+      || (selectedPerformerId ? pairForPerformer(partnerSet?.pairs || [], selectedPerformerId) : null);
+
+    if (selectedPair) {
+      const finalPositions = positionsForPairCenter(selectedPair, targetPoint);
+      if (!finalPositions) return;
+      const drag = {
+        mode: "pair-move",
+        source: "tap",
+        pair: [...selectedPair],
+        sectionId: selectedSection.id,
+        pointer: targetPoint,
+        finalPositions
+      };
+      commitDropAction(resolveDropAction({ drag }), drag);
+      setDragPositions(null);
+      setSelectedPairKey(pairKey(selectedPair));
+      return;
+    }
+
+    if (!selectedPerformerId) return;
+    const nextPosition = {
+      x: clamp(targetPoint.x, 4, 96),
+      y: clamp(targetPoint.y, 5, 95)
+    };
+    const nextPositions = { ...selectedSection.positions, [selectedPerformerId]: nextPosition };
+    const candidateId = findIndependentMagnetCandidate(selectedPerformerId, nextPosition, nextPositions, partnerSet?.pairs || []);
+    const drag = {
+      mode: "token-move",
+      source: "tap",
+      performerId: selectedPerformerId,
+      sectionId: selectedSection.id,
+      pointer: targetPoint,
+      individual: false,
+      finalPositions: { [selectedPerformerId]: nextPosition }
+    };
+    const action = resolveDropAction({
+      drag,
+      connectCandidate: candidateId ? { id: candidateId } : null,
+      swapCandidate: null
+    });
+    commitDropAction(action, drag);
+    setMagnetCandidateId("");
+    setDragHint("");
+    setDragPositions(null);
   }
 
   async function handleAudioFile(event) {
@@ -1354,6 +1561,7 @@ function App() {
     if (!file) return;
     const fingerprint = audioFingerprint(file);
     const restoredAudioUrl = resolveAudioUrl(plan.audio);
+    const replacingAudio = Boolean(restoredAudioUrl || audioSrc);
     if (restoredAudioUrl && audioMatchesFile(plan.audio, file, fingerprint)) {
       if (localAudioUrlRef.current) {
         URL.revokeObjectURL(localAudioUrlRef.current);
@@ -1365,12 +1573,15 @@ function App() {
       event.target.value = "";
       return;
     }
-    if (localAudioUrlRef.current) URL.revokeObjectURL(localAudioUrlRef.current);
-    const localUrl = URL.createObjectURL(file);
-    localAudioUrlRef.current = localUrl;
-    setAudioSrc(localUrl);
+    let localUrl = "";
+    if (!replacingAudio) {
+      if (localAudioUrlRef.current) URL.revokeObjectURL(localAudioUrlRef.current);
+      localUrl = URL.createObjectURL(file);
+      localAudioUrlRef.current = localUrl;
+      setAudioSrc(localUrl);
+    }
     setAudioUploadStatus("uploading");
-    setStatus("음악을 선택했습니다. 서버에 업로드하는 중...");
+    setStatus(replacingAudio ? "새 음악으로 교체하는 중..." : "음악을 선택했습니다. 서버에 업로드하는 중...");
     try {
       const audio = await uploadAudioToSupabase(file, plan?.localProjectId || plan?.title || "project", fingerprint);
       updatePlan((current) => ({ ...current, audio }));
@@ -1384,7 +1595,14 @@ function App() {
       event.target.value = "";
     } catch (error) {
       setAudioUploadStatus("failed");
-      setStatus(`음악 업로드 실패: ${error.message}. 현재 세션에서는 재생되지만 새로고침/공유 링크에는 음악이 유지되지 않을 수 있습니다.`);
+      if (!replacingAudio && localUrl) {
+        setAudioSrc("");
+        if (localAudioUrlRef.current) {
+          URL.revokeObjectURL(localAudioUrlRef.current);
+          localAudioUrlRef.current = "";
+        }
+      }
+      setStatus(`${replacingAudio ? "음악 교체 실패" : "음악 업로드 실패"}: ${error.message}`);
       event.target.value = "";
     }
   }
@@ -1567,6 +1785,11 @@ function App() {
   const hasPngBackup = false;
   const audioUrlSaved = Boolean(resolveAudioUrl(plan.audio));
   const audioLoadFailed = audioUploadStatus === "failed" && audioUrlSaved;
+  const hasUsableAudio = Boolean(audioSrc && audioUploadStatus !== "failed");
+  const musicActionLabel = audioUploadStatus === "uploading"
+    ? audioUrlSaved || hasUsableAudio ? "교체 중..." : "업로드 중..."
+    : audioLoadFailed ? "다시 연결" : audioUrlSaved || hasUsableAudio ? "교체" : "음악 업로드";
+  const musicTitle = plan.audio?.fileName || (hasUsableAudio ? "선택한 음악" : "");
 
   function renderMobileTabs(extraClass = "") {
     return (
@@ -1593,9 +1816,9 @@ function App() {
         <div className="panel-head">
           <div>
             <h2>대형</h2>
-            <p className="muted">음악 시각마다 도착할 대형을 관리합니다.</p>
+            <p className="muted">시각마다 도착할 대형을 관리합니다.</p>
           </div>
-          {!readonly && <button onClick={addSection}>현재 시간에 대형 만들기</button>}
+          {!readonly && <button onClick={addSection}>{hasUsableAudio ? "현재 시간에 대형 만들기" : "대형 추가"}</button>}
         </div>
         <div className="section-list mobile-section-list">
           {sortedSections.map((section) => (
@@ -1657,7 +1880,7 @@ function App() {
         <div className="tool-card">
           <strong>현재 선택</strong>
           <span>{dragHint || (selectedPerformer ? `${selectedPerformer.name || selectedPerformer.label} 토큰` : selectedPairKey ? "선택 커플" : "선택 없음")}</span>
-          <p className="muted">커플은 아무 토큰이나 잡고 이동합니다. 한 사람만 조정하거나 교체하려면 길게 누른 뒤 드래그하거나 Alt/Option을 누르고 드래그하세요.</p>
+          <p className="muted">토큰을 선택한 뒤 무대 빈 곳을 탭해도 이동합니다. 커플 토큰은 기본적으로 함께 이동합니다.</p>
           {!readonly && <button className="danger-button compact-danger" onClick={resetSelectedFormation}>대형 초기화</button>}
         </div>
         <div className="partner-box">
@@ -1802,15 +2025,21 @@ function App() {
               <div className="stage-meta">
                 <strong>{activeSection?.name}</strong>
                 <span>{formatTime(currentTime)} · 도착 {activeSection ? formatTime(pointTime(activeSection)) : "0:00.0"}</span>
+                <span className="music-meta">
+                  {musicTitle && <span className="music-name" title={musicTitle}>{musicTitle}</span>}
+                  {!readonly && audioLoadFailed ? (
+                    <button className="inline-action" onClick={reconnectServerAudio}>{musicActionLabel}</button>
+                  ) : !readonly ? (
+                    <label className="inline-action file-button">
+                      {musicActionLabel}
+                      <input type="file" accept="audio/*" onChange={handleAudioFile} disabled={audioUploadStatus === "uploading"} />
+                    </label>
+                  ) : null}
+                </span>
               </div>
             </div>
-            {!readonly && (
-              <div className="stage-toolbar-actions">
-                <button className="secondary" onClick={exportJson}>저장하기</button>
-              </div>
-            )}
           </div>
-          {!readonly && <p className="stage-hint">음악을 재생하고 원하는 순간에 대형을 만드세요.</p>}
+          {!readonly && <p className="stage-hint">{hasUsableAudio ? "음악을 재생하고 원하는 순간에 대형을 만드세요." : "음악 없이도 대형을 만들고 배치를 시작할 수 있습니다."}</p>}
           <div className="stage-frame">
             <div className="stage-corner-tools" aria-label="무대 도구">
               {!readonly && (
@@ -1852,7 +2081,15 @@ function App() {
                 {isStageFocus ? "↙" : "⛶"}
               </button>
             </div>
-            <svg ref={svgRef} className="stage" viewBox="0 0 100 100">
+            <svg
+              ref={svgRef}
+              className="stage"
+              viewBox="0 0 100 100"
+              onPointerMove={onStagePointerMove}
+              onPointerUp={finishActiveDrag}
+              onPointerCancel={clearDrag}
+              onClick={handleStageTap}
+            >
               <defs>
                 <marker id="arrow-live" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
                   <path d="M0,0 L5,2.5 L0,5 Z" fill="#334155" />
@@ -1888,9 +2125,23 @@ function App() {
                 const to = visiblePositions[b];
                 if (!from || !to) return null;
                 const selected = selectedPairKey === pairKey([a, b]) || (magnetCandidateId && [a, b].includes(magnetCandidateId));
-                return <line key={`pair-${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke={selected ? "#b4234f" : "#334155"} strokeWidth={selected ? "1.1" : "0.55"} opacity={selected ? "0.9" : "0.58"} />;
+                const pair = [a, b];
+                return (
+                  <g
+                    key={`pair-${index}`}
+                    className="pair-link"
+                    onPointerDown={(event) => onPairPointerDown(event, pair, index)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelectedPairKey(pairKey(pair));
+                    }}
+                  >
+                    <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke="transparent" strokeWidth="9" strokeLinecap="round" />
+                    <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke={selected ? "#b4234f" : "#334155"} strokeWidth={selected ? "1.1" : "0.55"} opacity={selected ? "0.9" : "0.58"} pointerEvents="none" />
+                  </g>
+                );
               })}
-              {magnetCandidateId && dragStateRef.current?.type === "token" && (() => {
+              {magnetCandidateId && dragStateRef.current?.mode === "token-move" && (() => {
                 const from = visiblePositions[dragStateRef.current.performerId] || selectedSection?.positions?.[dragStateRef.current.performerId];
                 const to = visiblePositions[magnetCandidateId] || selectedSection?.positions?.[magnetCandidateId];
                 if (!from || !to) return null;
@@ -1903,41 +2154,6 @@ function App() {
                   </g>
                 );
               })()}
-              {(partnerSet?.pairs || []).map((pair, index) => {
-                const [a, b] = pair;
-                const from = visiblePositions[a] || selectedSection?.positions?.[a];
-                const to = visiblePositions[b] || selectedSection?.positions?.[b];
-                if (!from || !to) return null;
-                const mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
-                const selected = selectedPairKey === pairKey(pair);
-                return (
-                  <g
-                    key={`pair-handle-${pairKey(pair)}-${index}`}
-                    className="pair-handle"
-                    onPointerDown={(event) => onPairPointerDown(event, pair, index)}
-                    onPointerMove={onPairPointerMove}
-                    onPointerUp={finishPairDrag}
-                    onPointerCancel={clearDrag}
-                    onLostPointerCapture={clearDrag}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedPairKey(pairKey(pair));
-                    }}
-                    onDoubleClick={(event) => {
-                      event.stopPropagation();
-                      removePairByKey(pairKey(pair));
-                    }}
-                  >
-                    <circle cx={mid.x} cy={mid.y} r="7.2" fill="transparent" />
-                    <polygon
-                      points={`${mid.x},${mid.y - 2.3} ${mid.x + 2.3},${mid.y} ${mid.x},${mid.y + 2.3} ${mid.x - 2.3},${mid.y}`}
-                      fill={selected ? "#b4234f" : "#ffffff"}
-                      stroke={selected ? "#7f1d1d" : "#334155"}
-                      strokeWidth="0.7"
-                    />
-                  </g>
-                );
-              })}
               {plan.performers.map((performer) => {
                 const pos = visiblePositions[performer.id] || selectedSection?.positions?.[performer.id];
                 if (!pos) return null;
@@ -1952,10 +2168,6 @@ function App() {
                     className={readonly ? "token readonly" : "token"}
                     opacity={dim ? 0.35 : 1}
                     onPointerDown={(event) => onStagePointerDown(event, performer.id)}
-                    onPointerMove={(event) => onStagePointerMove(event, performer.id)}
-                    onPointerUp={finishTokenDrag}
-                    onPointerCancel={clearDrag}
-                    onLostPointerCapture={clearDrag}
                     onClick={() => setSelectedPerformerId(performer.id)}
                   >
                     <title>{fullName}</title>
@@ -1965,6 +2177,37 @@ function App() {
                     {selectedPerformerId === performer.id && <circle cx={pos.x} cy={pos.y} r={SELECTED_RING_RADIUS} fill="none" stroke="#162033" strokeWidth="0.7" pointerEvents="none" />}
                     <circle cx={pos.x} cy={pos.y} r={TOKEN_RADIUS} fill={performer.color} stroke="#f8fafc" strokeWidth="0.8" />
                     <text x={pos.x} y={pos.y + fontSize * 0.34} textAnchor="middle" fontSize={fontSize} fill="#fff" fontWeight="800" pointerEvents="none">{shortName}</text>
+                  </g>
+                );
+              })}
+              {(partnerSet?.pairs || []).map((pair, index) => {
+                const [a, b] = pair;
+                const from = visiblePositions[a] || selectedSection?.positions?.[a];
+                const to = visiblePositions[b] || selectedSection?.positions?.[b];
+                if (!from || !to) return null;
+                const mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+                const selected = selectedPairKey === pairKey(pair);
+                return (
+                  <g
+                    key={`pair-handle-${pairKey(pair)}-${index}`}
+                    className="pair-handle"
+                    onPointerDown={(event) => onPairPointerDown(event, pair, index)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelectedPairKey(pairKey(pair));
+                    }}
+                    onDoubleClick={(event) => {
+                      event.stopPropagation();
+                      removePairByKey(pairKey(pair));
+                    }}
+                  >
+                    <circle cx={mid.x} cy={mid.y} r="9" fill="transparent" />
+                    <polygon
+                      points={`${mid.x},${mid.y - 2.8} ${mid.x + 2.8},${mid.y} ${mid.x},${mid.y + 2.8} ${mid.x - 2.8},${mid.y}`}
+                      fill={selected ? "#b4234f" : "#ffffff"}
+                      stroke={selected ? "#7f1d1d" : "#334155"}
+                      strokeWidth="0.8"
+                    />
                   </g>
                 );
               })}
@@ -1987,27 +2230,28 @@ function App() {
               </button>
             ))}
           </div>
-          <div className={audioLoadFailed ? "transport has-reconnect" : "transport"}>
-            <label className="file-button secondary audio-load">
-              {audioUploadStatus === "uploading" ? "업로드 중..." : audioUrlSaved ? "음악 교체" : "음악 업로드"}
-              <input type="file" accept="audio/*" onChange={handleAudioFile} />
-            </label>
-            {audioLoadFailed && <button className="secondary reconnect-button" onClick={reconnectServerAudio}>서버 음악 다시 연결</button>}
-            <button className="primary" onClick={togglePlayback}>
-              {isPlaying ? "정지" : "재생"}
-            </button>
-            <input
-              type="range"
-              min="0"
-              max={timelineMax}
-              step="0.1"
-              value={sliderTime}
-              onChange={(event) => {
-                const next = clamp(parseNumber(event.target.value, 0), 0, timelineMax);
-                setCurrentTime(next);
-                if (audioRef.current) audioRef.current.currentTime = next;
-              }}
-            />
+          <div className={hasUsableAudio ? "transport has-audio" : "transport no-audio"}>
+            {hasUsableAudio && (
+              <>
+                <button className="primary" onClick={togglePlayback}>
+                  {isPlaying ? "정지" : "재생"}
+                </button>
+                {!readonly && <button className="secondary capture-button" onClick={addSection}>현재 시간에 대형 만들기</button>}
+                <input
+                  type="range"
+                  min="0"
+                  max={timelineMax}
+                  step="0.1"
+                  value={sliderTime}
+                  onChange={(event) => {
+                    const next = clamp(parseNumber(event.target.value, 0), 0, timelineMax);
+                    setCurrentTime(next);
+                    if (audioRef.current) audioRef.current.currentTime = next;
+                  }}
+                />
+                <span className="time-readout">{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
+              </>
+            )}
             <audio
               ref={audioRef}
               src={audioSrc}
@@ -2040,8 +2284,7 @@ function App() {
                 setStatus("음악 URL을 불러오지 못했습니다. 다시 음악을 불러오세요.");
               }}
             />
-            <span className="time-readout">{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
-            {!readonly && <button className="secondary capture-button" onClick={addSection}>현재 시간에 대형 만들기</button>}
+            {!hasUsableAudio && !readonly && <button className="primary capture-button" onClick={addSection}>대형 추가</button>}
           </div>
           {selectedSection && (
             <div className="selected-formation-bar">
