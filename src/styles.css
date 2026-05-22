@@ -233,6 +233,13 @@ label {
   gap: 3px;
 }
 
+.readonly-banner .readonly-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .readonly-banner strong {
   color: #1e3a8a;
   font-size: 13px;
@@ -997,7 +1004,7 @@ h3 {
 }
 
 .share-actions {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .backup-actions {

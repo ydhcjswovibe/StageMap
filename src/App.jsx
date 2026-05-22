@@ -2142,18 +2142,16 @@ function App() {
         </div>
 
         <div className="share-actions">
+          <button onClick={exportJson}>저장하기</button>
           <button onClick={() => exportPng()}>현재 PNG</button>
           <button onClick={exportAllPng}>대형 PNG 전체 저장</button>
           <button onClick={() => window.print()}>인쇄/PDF</button>
         </div>
 
-        {!readonly && (
-          <div className="backup-actions">
-            <button className="tertiary" onClick={exportJson}>저장하기</button>
-            <label className="file-button tertiary">저장한 안무 열기<input type="file" accept="application/json" onChange={importJson} /></label>
-            <span>공유 링크가 실패해도 이 파일로 복원할 수 있습니다.</span>
-          </div>
-        )}
+        <div className="backup-actions">
+          {!readonly && <label className="file-button tertiary">저장한 안무 열기<input type="file" accept="application/json" onChange={importJson} /></label>}
+          <span>공유 링크가 실패해도 저장한 파일로 복원할 수 있습니다.</span>
+        </div>
 
         <p className="muted">공유 링크 저장이 실패하면 안무 파일 저장 또는 PNG/PDF로 대신 공유할 수 있습니다. 안무 파일은 .json 형식으로 저장되며, 음악은 public URL로 저장되어 링크를 아는 사람이 접근할 수 있습니다.</p>
       </div>
@@ -2218,7 +2216,10 @@ function App() {
             <strong>보기 전용 링크</strong>
             <span>공유된 안무를 확인 중입니다. 수정하려면 이 기기에 사본을 만드세요.</span>
           </div>
-          <button onClick={saveEditableCopy}>사본으로 편집</button>
+          <div className="readonly-actions">
+            <button onClick={exportJson}>저장하기</button>
+            <button onClick={saveEditableCopy}>사본으로 편집</button>
+          </div>
         </div>
       )}
 
@@ -2346,7 +2347,6 @@ function App() {
                     onPointerDown={(event) => onPairPointerDown(event, pair, index)}
                     onClick={(event) => {
                       event.stopPropagation();
-                      setSelectedPairKey(pairKey(pair));
                     }}
                   >
                     <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke="transparent" strokeWidth="9" strokeLinecap="round" />
@@ -2385,7 +2385,7 @@ function App() {
                     className={readonly ? "token readonly" : "token"}
                     opacity={dim ? 0.35 : 1}
                     onPointerDown={(event) => onStagePointerDown(event, performer.id)}
-                    onClick={() => setSelectedPerformerId(performer.id)}
+                    onClick={(event) => event.stopPropagation()}
                   >
                     <title>{fullName}</title>
                     <circle cx={pos.x} cy={pos.y} r="7.4" fill="transparent" />

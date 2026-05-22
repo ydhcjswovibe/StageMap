@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
+
+test("shows json save action in the readonly share banner", () => {
+  const readonlyBanner = appSource.match(/\{readonly && \(\s*<div className="readonly-banner">[\s\S]*?<\/div>\s*\)\}/)?.[0] || "";
+
+  assert.match(readonlyBanner, /<button onClick=\{exportJson\}>저장하기<\/button>/);
+  assert.match(readonlyBanner, /<button onClick=\{saveEditableCopy\}>사본으로 편집<\/button>/);
+});
+
+test("keeps json save with png and print exports in the share panel", () => {
+  const shareActions = appSource.match(/<div className="share-actions">[\s\S]*?<\/div>/)?.[0] || "";
+
+  assert.match(shareActions, /<button onClick=\{exportJson\}>저장하기<\/button>/);
+  assert.match(shareActions, /<button onClick=\{\(\) => exportPng\(\)\}>현재 PNG<\/button>/);
+  assert.match(shareActions, /<button onClick=\{exportAllPng\}>대형 PNG 전체 저장<\/button>/);
+  assert.match(shareActions, /<button onClick=\{\(\) => window\.print\(\)\}>인쇄\/PDF<\/button>/);
+});
