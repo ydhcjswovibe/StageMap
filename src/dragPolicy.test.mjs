@@ -166,10 +166,10 @@ test("pull-out movement without an allowed target only splits and moves the toke
   });
 });
 
-test("merge candidates use raw drag position and a narrow distance", () => {
+test("merge candidates allow visually overlapping tokens", () => {
   const candidate = findIndependentMergeCandidate({
     performerId: "p1",
-    rawPosition: { x: 53.1, y: 50 },
+    rawPosition: { x: 49.3, y: 50 },
     positions: {
       p1: { x: 50, y: 50 },
       p2: { x: 56.2, y: 50 }
@@ -182,10 +182,25 @@ test("merge candidates use raw drag position and a narrow distance", () => {
   assert.ok(candidate.gap <= COUPLE_MERGE_DISTANCE);
 });
 
+test("nearby but non-overlapping tokens do not create a merge candidate", () => {
+  const candidate = findIndependentMergeCandidate({
+    performerId: "p1",
+    rawPosition: { x: 49.1, y: 50 },
+    positions: {
+      p1: { x: 50, y: 50 },
+      p2: { x: 56.2, y: 50 }
+    },
+    performers: [{ id: "p1" }, { id: "p2" }],
+    pairs: []
+  });
+
+  assert.equal(candidate, null);
+});
+
 test("snapped closeness alone does not create a merge candidate", () => {
   const candidate = findIndependentMergeCandidate({
     performerId: "p1",
-    rawPosition: { x: 52.9, y: 50 },
+    rawPosition: { x: 49.1, y: 50 },
     positions: {
       p1: { x: 50, y: 50 },
       p2: { x: 56.2, y: 50 }
@@ -200,7 +215,7 @@ test("snapped closeness alone does not create a merge candidate", () => {
 test("merge candidates require both tokens to be independent", () => {
   const candidate = findIndependentMergeCandidate({
     performerId: "p1",
-    rawPosition: { x: 53.1, y: 50 },
+    rawPosition: { x: 49.3, y: 50 },
     positions: {
       p1: { x: 50, y: 50 },
       p2: { x: 56.2, y: 50 },

@@ -1,4 +1,4 @@
-export const COUPLE_MERGE_DISTANCE = 3.2;
+export const COUPLE_MERGE_DISTANCE = 7.0;
 export const PULL_OUT_MOVE_THRESHOLD = 0.8;
 
 function distance(a, b) {
