@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { horizontalCouplePositions } from "./coupleLayout.mjs";
+import { horizontalCouplePositions, pairHandlePosition } from "./coupleLayout.mjs";
 import { resolveDropAction } from "./dragPolicy.mjs";
 import { createProjectJsonDownload } from "./projectJson.mjs";
 import { partnerSetIdForAddedSection } from "./sectionPolicy.mjs";
@@ -2160,6 +2160,41 @@ function App() {
                   </g>
                 );
               })()}
+              {(partnerSet?.pairs || []).map((pair, index) => {
+                const [a, b] = pair;
+                const from = visiblePositions[a] || selectedSection?.positions?.[a];
+                const to = visiblePositions[b] || selectedSection?.positions?.[b];
+                if (!from || !to) return null;
+                const mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+                const handle = pairHandlePosition(mid);
+                const selected = selectedPairKey === pairKey(pair);
+                return (
+                  <g
+                    key={`pair-handle-${pairKey(pair)}-${index}`}
+                    className="pair-handle"
+                    onPointerDown={(event) => onPairPointerDown(event, pair, index)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelectedPairKey(pairKey(pair));
+                    }}
+                    onDoubleClick={(event) => {
+                      event.stopPropagation();
+                      removePairByKey(pairKey(pair));
+                    }}
+                  >
+                    <circle cx={handle.x} cy={handle.y} r="9" fill="transparent" />
+                    <circle
+                      className="pair-handle-dot"
+                      cx={handle.x}
+                      cy={handle.y}
+                      r="1.8"
+                      fill={selected ? "#b4234f" : "#ffffff"}
+                      stroke={selected ? "#7f1d1d" : "#334155"}
+                      strokeWidth="0.8"
+                    />
+                  </g>
+                );
+              })}
               {plan.performers.map((performer) => {
                 const pos = visiblePositions[performer.id] || selectedSection?.positions?.[performer.id];
                 if (!pos) return null;
@@ -2183,37 +2218,6 @@ function App() {
                     {selectedPerformerId === performer.id && <circle cx={pos.x} cy={pos.y} r={SELECTED_RING_RADIUS} fill="none" stroke="#162033" strokeWidth="0.7" pointerEvents="none" />}
                     <circle cx={pos.x} cy={pos.y} r={TOKEN_RADIUS} fill={performer.color} stroke="#f8fafc" strokeWidth="0.8" />
                     <text x={pos.x} y={pos.y + fontSize * 0.34} textAnchor="middle" fontSize={fontSize} fill="#fff" fontWeight="800" pointerEvents="none">{shortName}</text>
-                  </g>
-                );
-              })}
-              {(partnerSet?.pairs || []).map((pair, index) => {
-                const [a, b] = pair;
-                const from = visiblePositions[a] || selectedSection?.positions?.[a];
-                const to = visiblePositions[b] || selectedSection?.positions?.[b];
-                if (!from || !to) return null;
-                const mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
-                const selected = selectedPairKey === pairKey(pair);
-                return (
-                  <g
-                    key={`pair-handle-${pairKey(pair)}-${index}`}
-                    className="pair-handle"
-                    onPointerDown={(event) => onPairPointerDown(event, pair, index)}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedPairKey(pairKey(pair));
-                    }}
-                    onDoubleClick={(event) => {
-                      event.stopPropagation();
-                      removePairByKey(pairKey(pair));
-                    }}
-                  >
-                    <circle cx={mid.x} cy={mid.y} r="9" fill="transparent" />
-                    <polygon
-                      points={`${mid.x},${mid.y - 2.8} ${mid.x + 2.8},${mid.y} ${mid.x},${mid.y + 2.8} ${mid.x - 2.8},${mid.y}`}
-                      fill={selected ? "#b4234f" : "#ffffff"}
-                      stroke={selected ? "#7f1d1d" : "#334155"}
-                      strokeWidth="0.8"
-                    />
                   </g>
                 );
               })}

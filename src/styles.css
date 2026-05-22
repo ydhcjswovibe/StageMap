@@ -537,7 +537,7 @@ h3 {
   cursor: move;
 }
 
-.pair-handle:hover polygon {
+.pair-handle:hover .pair-handle-dot {
   fill: #b4234f;
   stroke: #7f1d1d;
 }
