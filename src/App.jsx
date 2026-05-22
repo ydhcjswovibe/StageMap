@@ -22,13 +22,6 @@ const PERFORMANCE_TYPES = {
   mixed: "혼합공연"
 };
 
-const MOBILE_TABS = [
-  ["formations", "대형"],
-  ["arrange", "배치"],
-  ["performers", "출연자"],
-  ["share", "공유"]
-];
-
 const MOVE_MODES = {
   hold: "고정",
   smooth: "부드럽게 이동",
@@ -655,8 +648,8 @@ function App() {
   const [tapMoveArmed, setTapMoveArmed] = useState(false);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [dragPositions, setDragPositions] = useState(null);
-  const [activeToolTab, setActiveToolTab] = useState("formations");
-  const [isBottomSheetOpen, setIsBottomSheetOpen] = useState(false);
+  const [isToolDrawerOpen, setIsToolDrawerOpen] = useState(false);
+  const [isShareMenuOpen, setIsShareMenuOpen] = useState(false);
   const [isBottomSheetExpanded, setIsBottomSheetExpanded] = useState(false);
   const [isStageFocus, setIsStageFocus] = useState(false);
   const [undoStack, setUndoStack] = useState([]);
@@ -844,15 +837,16 @@ function App() {
     const nextMoveDuration = moveDuration === null
       ? pointMoveDuration(sortedSections.find((section) => section.id === sectionId) || {})
       : Math.max(0, Number(moveDuration) || 0);
+    const safeMoveDuration = Math.min(safeTime, nextMoveDuration);
     updateSection(sectionId, {
       time: safeTime,
-      moveDuration: nextMoveDuration,
-      start: Math.max(0, safeTime - nextMoveDuration),
+      moveDuration: safeMoveDuration,
+      start: safeTime - safeMoveDuration,
       end: safeTime
     });
   }
 
-  function nudgeSelectedSection(delta) {
+  function nudgeSelectedArrival(delta) {
     if (!selectedSection) return;
     updateSectionTiming(selectedSection.id, pointTime(selectedSection) + delta);
   }
@@ -862,10 +856,16 @@ function App() {
     updateSectionTiming(selectedSection.id, pointTime(selectedSection), moveDuration);
   }
 
-  function syncSelectedSectionToCurrentTime() {
+  function setSelectedMoveStart(startTime) {
     if (!selectedSection) return;
-    const nextTime = audioRef.current ? audioRef.current.currentTime || currentTime : currentTime;
-    updateSectionTiming(selectedSection.id, nextTime);
+    const arrivalTime = pointTime(selectedSection);
+    const safeStart = clamp(Number(startTime) || 0, 0, arrivalTime);
+    updateSectionTiming(selectedSection.id, arrivalTime, arrivalTime - safeStart);
+  }
+
+  function nudgeSelectedMoveStart(delta) {
+    if (!selectedSection) return;
+    setSelectedMoveStart(pointMoveStart(selectedSection) + delta);
   }
 
   function clientToStagePoint(event) {
@@ -1924,22 +1924,19 @@ function App() {
     : audioLoadFailed ? "다시 연결" : audioUrlSaved || hasUsableAudio ? "교체" : "음악 업로드";
   const musicTitle = plan.audio?.fileName || (hasUsableAudio ? "선택한 음악" : "");
 
-  function renderMobileTabs(extraClass = "") {
+  function renderShareMenu() {
     return (
-      <nav className={`mobile-tabs ${extraClass}`.trim()}>
-        {MOBILE_TABS.map(([value, label]) => (
-          <button
-            key={value}
-            className={activeToolTab === value ? "active" : ""}
-            onClick={() => {
-              setActiveToolTab(value);
-              setIsBottomSheetOpen(true);
-            }}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+      <div className="top-action-menu share-action-menu">
+        {!readonly && <button onClick={shareProject}>공유 링크 만들기</button>}
+        {shareUrl && (
+          <a href={shareUrl}>보기 전용 링크 열기</a>
+        )}
+        <button onClick={exportJson}>{readonly ? "JSON 내보내기" : "안무 파일 공유"}</button>
+        <button onClick={() => exportPng()}>현재 PNG</button>
+        <button onClick={exportAllPng}>대형 PNG 전체 저장</button>
+        <button onClick={() => window.print()}>인쇄/PDF</button>
+        {!readonly && <label className="file-button tertiary">저장한 안무 열기<input type="file" accept="application/json" onChange={importJson} /></label>}
+      </div>
     );
   }
 
@@ -2069,6 +2066,24 @@ function App() {
     );
   }
 
+  function renderSelectedFormationTools() {
+    if (!selectedSection) return null;
+
+    return (
+      <div className="selected-formation-tools">
+        <span>선택 대형</span>
+        <strong>{selectedSection?.name || "대형 없음"}</strong>
+        {!readonly && (
+          <div className="selected-formation-tool-actions">
+            <button onClick={duplicateSection}>복제</button>
+            <button className="danger-button compact-danger" onClick={deleteSection}>삭제</button>
+            <button className="danger-button compact-danger" onClick={resetSelectedFormation}>대형 초기화</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function renderPerformersPanel() {
     return (
       <div className="form-stack">
@@ -2158,14 +2173,22 @@ function App() {
     );
   }
 
-  function renderToolPanelContent() {
-    if (activeToolTab === "formations") return renderFormationPanel();
-    if (activeToolTab === "arrange") return renderArrangePanel();
-    if (activeToolTab === "performers") return renderPerformersPanel();
-    return renderSharePanel();
+  function renderToolDrawerContent() {
+    return (
+      <>
+        <div className="inspector-now">
+          <span>현재 작업</span>
+          <strong>{selectedSection?.name || activeSection?.name || "대형 없음"}</strong>
+          <em>{formatTime(sliderTime)} · 도착 {selectedSection ? formatTime(pointTime(selectedSection)) : "0:00.0"} · 이동 시작 {selectedSection ? formatTime(pointMoveStart(selectedSection)) : "0:00.0"}</em>
+          <em>{selectedStateText}</em>
+        </div>
+        {renderSelectedFormationTools()}
+        {renderArrangePanel()}
+        {renderPerformersPanel()}
+      </>
+    );
   }
 
-  const activeToolLabel = MOBILE_TABS.find(([value]) => value === activeToolTab)?.[1] || "대형";
   const selectedPerformer = plan.performers.find((performer) => performer.id === selectedPerformerId);
   const localSaveLabel = readonly
     ? "보기 전용"
@@ -2222,7 +2245,7 @@ function App() {
         </div>
       )}
 
-      <main className="workspace">
+      <main className={isToolDrawerOpen ? "workspace tools-open" : "workspace"}>
         <section className="stage-area">
           <div className="stage-toolbar">
             <div className="stage-title-block">
@@ -2249,6 +2272,16 @@ function App() {
                   ) : null}
                 </span>
               </div>
+            </div>
+            <div className="stage-toolbar-actions">
+              {!readonly && <button className="primary" onClick={saveProjectToCloud}>저장하기</button>}
+              <div className="top-action-group">
+                <button onClick={() => setIsShareMenuOpen((value) => !value)}>공유</button>
+                {isShareMenuOpen && renderShareMenu()}
+              </div>
+              <button onClick={() => setIsToolDrawerOpen((value) => !value)}>
+                {isToolDrawerOpen ? "도구 닫기" : "도구"}
+              </button>
             </div>
           </div>
           {!readonly && <p className="stage-hint">{hasUsableAudio ? "음악을 재생하고 원하는 순간에 대형을 만드세요." : "음악 없이도 대형을 만들고 배치를 시작할 수 있습니다."}</p>}
@@ -2417,27 +2450,27 @@ function App() {
             ))}
           </div>
           <div className={hasUsableAudio ? "transport has-audio" : "transport no-audio"}>
-            {hasUsableAudio && (
-              <>
-                <button className="primary" onClick={togglePlayback}>
-                  {isPlaying ? "정지" : "재생"}
-                </button>
-                {!readonly && <button className="secondary capture-button" onClick={addSection}>대형 추가</button>}
-                <input
-                  type="range"
-                  min="0"
-                  max={timelineMax}
-                  step="0.1"
-                  value={sliderTime}
-                  onChange={(event) => {
-                    const next = clamp(parseNumber(event.target.value, 0), 0, timelineMax);
-                    setCurrentTime(next);
-                    if (audioRef.current) audioRef.current.currentTime = next;
-                  }}
-                />
-                <span className="time-readout">{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
-              </>
+            <button className="primary playback-button" onClick={togglePlayback} disabled={!hasUsableAudio}>
+              {isPlaying ? "정지" : "재생"}
+            </button>
+            {!readonly && <button className="secondary capture-button" onClick={addSection}>대형 추가</button>}
+            {hasUsableAudio ? (
+              <input
+                type="range"
+                min="0"
+                max={timelineMax}
+                step="0.1"
+                value={sliderTime}
+                onChange={(event) => {
+                  const next = clamp(parseNumber(event.target.value, 0), 0, timelineMax);
+                  setCurrentTime(next);
+                  if (audioRef.current) audioRef.current.currentTime = next;
+                }}
+              />
+            ) : (
+              <span className="time-track-placeholder">음악 없음</span>
             )}
+            <span className="time-readout">{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
             <audio
               ref={audioRef}
               src={audioSrc}
@@ -2472,7 +2505,6 @@ function App() {
                 setStatus("음악 URL을 불러오지 못했습니다. 다시 음악을 불러오세요.");
               }}
             />
-            {!hasUsableAudio && !readonly && <button className="primary capture-button" onClick={addSection}>대형 추가</button>}
           </div>
           {selectedSection && (
             <div className="selected-formation-bar">
@@ -2481,17 +2513,28 @@ function App() {
                 <input readOnly={readonly} value={selectedSection.name} onChange={(event) => updateSection(selectedSection.id, { name: event.target.value })} />
               </label>
               <div className="arrival-time-control">
-                <span>도착 {formatTime(pointTime(selectedSection))}</span>
+                <span>도착 시각</span>
+                <strong>{formatTime(pointTime(selectedSection))}</strong>
                 {!readonly && (
                   <div className="arrival-nudges" aria-label="도착 시각 빠른 조정">
-                    <button onClick={() => nudgeSelectedSection(-0.1)}>-</button>
-                    <button onClick={() => nudgeSelectedSection(0.1)}>+</button>
+                    <button onClick={() => nudgeSelectedArrival(-0.1)}>-</button>
+                    <button onClick={() => nudgeSelectedArrival(0.1)}>+</button>
+                  </div>
+                )}
+              </div>
+              <div className="movement-duration-control">
+                <span>이동 시작</span>
+                <strong>{formatTime(pointMoveStart(selectedSection))}</strong>
+                {!readonly && (
+                  <div className="arrival-nudges" aria-label="이동 시작 빠른 조정">
+                    <button onClick={() => nudgeSelectedMoveStart(-0.1)}>-</button>
+                    <button onClick={() => nudgeSelectedMoveStart(0.1)}>+</button>
                   </div>
                 )}
               </div>
               <div className="movement-duration-control">
                 <span>이동 시간</span>
-                <strong>{pointMoveDuration(selectedSection)}초 적용</strong>
+                <strong>{pointMoveDuration(selectedSection)}초 · 도착 전부터 이동</strong>
                 {!readonly && (
                   <div className="duration-chips" aria-label="이동 시간 빠른 선택">
                     {[0, 2, 4, 8].map((seconds) => (
@@ -2500,7 +2543,7 @@ function App() {
                         className={pointMoveDuration(selectedSection) === seconds ? "active" : ""}
                         onClick={() => setSelectedMoveDuration(seconds)}
                       >
-                        {seconds === 0 ? "즉시" : `${seconds}초`}
+                        {seconds === 0 ? "즉시" : `${seconds}초 전`}
                       </button>
                     ))}
                   </div>
@@ -2510,39 +2553,31 @@ function App() {
           )}
         </section>
 
-        <aside className="tool-inspector">
-          <div className="inspector-now">
-            <span>현재 작업</span>
-            <strong>{selectedSection?.name || activeSection?.name || "대형 없음"}</strong>
-            <em>{formatTime(sliderTime)} · 도착 {selectedSection ? formatTime(pointTime(selectedSection)) : "0:00.0"} · 이동 {selectedSection ? pointMoveDuration(selectedSection) : 0}초</em>
-            <em>{selectedStateText}</em>
-          </div>
-          {renderMobileTabs("inspector-tabs")}
-          <div className="inspector-panel">
-            {renderToolPanelContent()}
-          </div>
-        </aside>
-        <aside className="landscape-tools">
-          {renderMobileTabs("mobile-tabs-rail")}
-          <div className="mobile-panel landscape-panel">
-            {renderToolPanelContent()}
-          </div>
-        </aside>
+        {isToolDrawerOpen && (
+          <aside className="tool-drawer">
+            <div className="drawer-head">
+              <strong>도구</strong>
+              <button onClick={() => setIsToolDrawerOpen(false)}>닫기</button>
+            </div>
+            <div className="inspector-panel">
+              {renderToolDrawerContent()}
+            </div>
+          </aside>
+        )}
       </main>
 
       <section className="mobile-editor">
-        {renderMobileTabs()}
-        {isBottomSheetOpen && (
+        {isToolDrawerOpen && (
           <div className={isBottomSheetExpanded ? "mobile-bottom-sheet expanded" : "mobile-bottom-sheet"}>
             <div className="bottom-sheet-head">
-              <strong>{activeToolLabel}</strong>
+              <strong>도구</strong>
               <div className="row-actions">
                 <button onClick={() => setIsBottomSheetExpanded((value) => !value)}>{isBottomSheetExpanded ? "축소" : "확장"}</button>
-                <button onClick={() => setIsBottomSheetOpen(false)}>닫기</button>
+                <button onClick={() => setIsToolDrawerOpen(false)}>닫기</button>
               </div>
             </div>
             <div className="mobile-panel">
-              {renderToolPanelContent()}
+              {renderToolDrawerContent()}
             </div>
           </div>
         )}
