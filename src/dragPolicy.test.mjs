@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -251,4 +252,22 @@ test("long-press readiness without movement keeps the pair together", () => {
   };
 
   assert.equal(shouldStartPairMemberPullOut(drag, { x: 10.2, y: 10.1 }), false);
+});
+
+test("completed pointer drags clear the active performer or pair selection", () => {
+  const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
+  const finishTokenDrag = appSource.match(/function finishTokenDrag\(\) \{[\s\S]*?function clearDrag/)?.[0] || "";
+  const finishPairDrag = appSource.match(/function finishPairDrag\(\) \{[\s\S]*?function onPairPointerDown/)?.[0] || "";
+
+  assert.match(finishTokenDrag, /if \(drag\.moved\) \{[\s\S]*?commitDropAction\(action, drag\);[\s\S]*?clearSelection\(\);[\s\S]*?\}/);
+  assert.match(finishPairDrag, /if \(drag\?\.mode === "pair-move" && drag\.finalPositions\) \{[\s\S]*?commitDropAction\(action, drag\);[\s\S]*?clearSelection\(\);[\s\S]*?\}/);
+});
+
+test("formation changes clear performer and pair selection", () => {
+  const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
+  const jumpTo = appSource.match(/function jumpTo\(section\) \{[\s\S]*?\n  \}/)?.[0] || "";
+  const playbackSectionSync = appSource.match(/useEffect\(\(\) => \{[\s\S]*?activeSection\?\.id[\s\S]*?\}, \[isPlaying, activeSection\?\.id\]\);/)?.[0] || "";
+
+  assert.match(jumpTo, /clearSelection\(\);/);
+  assert.match(playbackSectionSync, /clearSelection\(\);/);
 });

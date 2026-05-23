@@ -756,7 +756,10 @@ function App() {
   }, [plan, sortedSections, activeSectionIndex, currentTime, isPlaying, dragPositions]);
 
   useEffect(() => {
-    if (isPlaying && activeSection?.id) setSelectedSectionId(activeSection.id);
+    if (isPlaying && activeSection?.id) {
+      setSelectedSectionId(activeSection.id);
+      clearSelection();
+    }
   }, [isPlaying, activeSection?.id]);
 
   function resetTransientEditState() {
@@ -1473,6 +1476,7 @@ function App() {
           swapCandidate: drag.swapCandidate
         });
         commitDropAction(action, drag);
+        clearSelection();
       }
     }
     setMagnetCandidateId("");
@@ -1505,6 +1509,7 @@ function App() {
     if (drag?.mode === "pair-move" && drag.finalPositions) {
       const action = resolveDropAction({ drag });
       commitDropAction(action, drag);
+      clearSelection();
     }
     setDragPositions(null);
     setDragHint("");
@@ -1710,6 +1715,7 @@ function App() {
   }
 
   function jumpTo(section) {
+    clearSelection();
     setSelectedSectionId(section.id);
     const nextTime = pointTime(section);
     setCurrentTime(nextTime);
@@ -1792,6 +1798,18 @@ function App() {
     } catch (error) {
       setStatusRecovery("share");
       setStatus(`Supabase 저장 실패: ${error.message}. 파일로 공유하거나 백업할 수 있습니다.`);
+    }
+  }
+
+  async function copyShareUrl() {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard?.writeText(shareUrl);
+      setStatusRecovery("");
+      setStatus("공유 링크를 복사했습니다.");
+    } catch (error) {
+      setStatusRecovery("");
+      setStatus("공유 링크 복사 실패: 브라우저 주소 표시줄에서 직접 복사해 주세요.");
     }
   }
 
@@ -1929,7 +1947,10 @@ function App() {
       <div className="top-action-menu share-action-menu">
         {!readonly && <button onClick={shareProject}>공유 링크 만들기</button>}
         {shareUrl && (
-          <a href={shareUrl}>보기 전용 링크 열기</a>
+          <>
+            <a href={shareUrl}>보기 전용 링크 열기</a>
+            <button onClick={copyShareUrl}>링크 복사</button>
+          </>
         )}
         <button onClick={exportJson}>{readonly ? "JSON 내보내기" : "안무 파일 공유"}</button>
         <button onClick={() => exportPng()}>현재 PNG</button>
@@ -2135,7 +2156,10 @@ function App() {
         {shareUrl && (
           <div className="share-link-box">
             <span>보기 전용 링크</span>
-            <a href={shareUrl}>{shareUrl}</a>
+            <div className="share-link-row">
+              <a href={shareUrl}>{shareUrl}</a>
+              <button onClick={copyShareUrl}>링크 복사</button>
+            </div>
           </div>
         )}
 

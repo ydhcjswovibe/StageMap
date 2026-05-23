@@ -36,3 +36,14 @@ test("share link creation saves through the cloud project path", () => {
   assert.match(shareProject, /const saved = await persistProjectToCloud\(\);/);
   assert.match(shareProject, /const nextUrl = shareUrlForProject\(saved\.id\);/);
 });
+
+test("offers a copy button for generated share links", () => {
+  const copyShareUrl = appSource.match(/async function copyShareUrl\(\) \{[\s\S]*?function exportJson/)?.[0] || "";
+  const shareMenu = appSource.match(/function renderShareMenu\(\) \{[\s\S]*?function renderFormationPanel/)?.[0] || "";
+  const sharePanel = appSource.match(/function renderSharePanel\(\) \{[\s\S]*?function renderToolDrawerContent/)?.[0] || "";
+
+  assert.match(copyShareUrl, /navigator\.clipboard\?\.writeText/);
+  assert.match(copyShareUrl, /공유 링크를 복사했습니다/);
+  assert.match(shareMenu, /<button onClick=\{copyShareUrl\}>링크 복사<\/button>/);
+  assert.match(sharePanel, /<button onClick=\{copyShareUrl\}>링크 복사<\/button>/);
+});
