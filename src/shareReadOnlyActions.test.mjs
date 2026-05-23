@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
 test("keeps the readonly share banner focused on editable copies", () => {
   const readonlyBanner = appSource.match(/\{readonly && \(\s*<div className="readonly-banner">[\s\S]*?<\/div>\s*\)\}/)?.[0] || "";
@@ -28,6 +29,16 @@ test("offers file sharing fallbacks when cloud save fails", () => {
   assert.match(statusActions, /<button onClick=\{exportJson\}>안무 파일 공유<\/button>/);
   assert.match(statusActions, /<button onClick=\{\(\) => exportPng\(\)\}>현재 PNG<\/button>/);
   assert.match(statusActions, /<button onClick=\{\(\) => window\.print\(\)\}>인쇄\/PDF<\/button>/);
+});
+
+test("gives readonly share playback a three-column transport layout", () => {
+  const transport = appSource.match(/<div className=\{[\s\S]*?"transport[\s\S]*?\}>\s*<button className="primary playback-button"/)?.[0] || "";
+  const readonlyTransportRule = stylesSource.match(/\.transport\.readonly[\s\S]*?\}/)?.[0] || "";
+  const readonlyLandscapeRule = stylesSource.match(/\.transport\.readonly,\s*\.transport\.readonly\.has-audio,\s*\.transport\.readonly\.no-audio[\s\S]*?\}/)?.[0] || "";
+
+  assert.match(transport, /readonly \? " readonly" : ""/);
+  assert.match(readonlyTransportRule, /grid-template-columns:\s*74px minmax\(120px, 1fr\) 118px;/);
+  assert.match(readonlyLandscapeRule, /grid-template-columns:\s*74px minmax\(120px, 1fr\) 104px;/);
 });
 
 test("share link creation saves through the cloud project path", () => {

@@ -685,6 +685,10 @@ h3 {
   grid-template-columns: 74px 182px minmax(120px, 1fr) 118px;
 }
 
+.transport.readonly {
+  grid-template-columns: 74px minmax(120px, 1fr) 118px;
+}
+
 .transport audio {
   display: none;
 }
@@ -1491,6 +1495,12 @@ h3 {
   .transport.no-audio {
     grid-template-columns: 74px 126px minmax(120px, 1fr) 104px;
     margin-top: 8px;
+  }
+
+  .transport.readonly,
+  .transport.readonly.has-audio,
+  .transport.readonly.no-audio {
+    grid-template-columns: 74px minmax(120px, 1fr) 104px;
   }
 
   .selected-formation-bar {

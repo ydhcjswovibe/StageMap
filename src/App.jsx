@@ -2473,7 +2473,7 @@ function App() {
               </button>
             ))}
           </div>
-          <div className={hasUsableAudio ? "transport has-audio" : "transport no-audio"}>
+          <div className={`${hasUsableAudio ? "transport has-audio" : "transport no-audio"}${readonly ? " readonly" : ""}`}>
             <button className="primary playback-button" onClick={togglePlayback} disabled={!hasUsableAudio}>
               {isPlaying ? "정지" : "재생"}
             </button>
