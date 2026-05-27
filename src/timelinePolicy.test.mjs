@@ -12,6 +12,7 @@ import {
   formationTimelineBlock,
   formationTimelinePixels,
   formationTimelineLabel,
+  layoutFormationBlocks,
   movementKeyframeTime,
   movementKeyframePositions,
   normalizeWheelDelta,
@@ -214,26 +215,26 @@ test("buildWaveformBars returns deterministic normalized bar heights", () => {
   assert.ok(bars.every((bar) => bar >= 0 && bar <= 1));
 });
 
-test("right trim ripples following formation segments while preserving their durations", () => {
+test("right trim stops at the next formation instead of pushing it while expanding", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
     { id: "c", time: 10, moveDuration: 2 }
   ];
 
-  const trimmed = trimFormationSegment({ sections, sectionId: "b", edge: "right", time: 10, timelineMax: 20 });
+  const trimmed = trimFormationSegment({ sections, sectionId: "b", edge: "right", time: 12, timelineMax: 20 });
 
   assert.deepEqual(
     trimmed.map((section) => ({ id: section.id, start: section.start, end: section.end, time: section.time, moveDuration: section.moveDuration })),
     [
       { id: "a", start: undefined, end: undefined, time: 0, moveDuration: 0 },
-      { id: "b", start: 5, end: 10, time: 10, moveDuration: 5 },
-      { id: "c", start: 10, end: 12, time: 12, moveDuration: 2 }
+      { id: "b", start: 5, end: 8, time: 8, moveDuration: 3 },
+      { id: "c", start: undefined, end: undefined, time: 10, moveDuration: 2 }
     ]
   );
 });
 
-test("right trim consumes empty gap before rippling following formation segments", () => {
+test("right trim consumes empty gap and locks before the next formation", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -251,14 +252,35 @@ test("right trim consumes empty gap before rippling following formation segments
     ]
   );
 
-  const pastGap = trimFormationSegment({ sections, sectionId: "b", edge: "right", time: 15, timelineMax: 20 });
+  const pastGap = trimFormationSegment({ sections, sectionId: "b", edge: "right", time: 17, timelineMax: 20 });
 
   assert.deepEqual(
     pastGap.map((section) => ({ id: section.id, start: section.start, end: section.end, time: section.time, moveDuration: section.moveDuration })),
     [
       { id: "a", start: undefined, end: undefined, time: 0, moveDuration: 0 },
-      { id: "b", start: 5, end: 15, time: 15, moveDuration: 10 },
-      { id: "c", start: 15, end: 17, time: 17, moveDuration: 2 }
+      { id: "b", start: 5, end: 14, time: 14, moveDuration: 9 },
+      { id: "c", start: undefined, end: undefined, time: 16, moveDuration: 2 }
+    ]
+  );
+});
+
+test("right trim shrink pulls only contiguous following formation segments", () => {
+  const sections = [
+    { id: "a", time: 0, moveDuration: 0 },
+    { id: "b", time: 8, moveDuration: 3 },
+    { id: "c", time: 10, moveDuration: 2 },
+    { id: "d", time: 18, moveDuration: 3 }
+  ];
+
+  const trimmed = trimFormationSegment({ sections, sectionId: "b", edge: "right", time: 6, timelineMax: 30 });
+
+  assert.deepEqual(
+    trimmed.map((section) => ({ id: section.id, start: section.start, end: section.end, time: section.time, moveDuration: section.moveDuration })),
+    [
+      { id: "a", start: undefined, end: undefined, time: 0, moveDuration: 0 },
+      { id: "b", start: 5, end: 6, time: 6, moveDuration: 1 },
+      { id: "c", start: 6, end: 8, time: 8, moveDuration: 2 },
+      { id: "d", start: undefined, end: undefined, time: 18, moveDuration: 3 }
     ]
   );
 });
@@ -292,6 +314,21 @@ test("left trim changes only the selected segment start", () => {
   assert.equal(trimmed[1].start, 6);
   assert.equal(trimmed[1].end, 8);
   assert.equal(trimmed[1].moveDuration, 2);
+  assert.equal(trimmed[2].time, 14);
+});
+
+test("left trim locks at the previous formation boundary", () => {
+  const sections = [
+    { id: "a", time: 0, moveDuration: 0 },
+    { id: "b", time: 8, moveDuration: 3 },
+    { id: "c", time: 14, moveDuration: 2 }
+  ];
+
+  const trimmed = trimFormationSegment({ sections, sectionId: "b", edge: "left", time: -10, timelineMax: 20 });
+
+  assert.equal(trimmed[1].start, 0);
+  assert.equal(trimmed[1].end, 8);
+  assert.equal(trimmed[1].moveDuration, 8);
   assert.equal(trimmed[2].time, 14);
 });
 
@@ -431,6 +468,46 @@ test("body drag can reorder the third adjacent segment between the first and sec
       duration: 4,
       toIndex: 1
     }
+  );
+});
+
+test("formation block layout preserves logical x positions in a single lane", () => {
+  const sections = [
+    { id: "a", time: 0, moveDuration: 0 },
+    { id: "b", time: 8, moveDuration: 8 },
+    { id: "c", time: 10, moveDuration: 4 },
+    { id: "d", time: 20, moveDuration: 2 }
+  ];
+
+  const blocks = layoutFormationBlocks(sections, 10);
+
+  assert.deepEqual(
+    blocks.map((block) => ({ id: block.sectionId, left: block.leftPx, width: block.widthPx, hit: block.hitWidthPx, row: block.row })),
+    [
+      { id: "a", left: 0, width: 0, hit: 0, row: 0 },
+      { id: "b", left: 0, width: 80, hit: 80, row: 0 },
+      { id: "c", left: 60, width: 40, hit: 40, row: 0 },
+      { id: "d", left: 180, width: 20, hit: 20, row: 0 }
+    ]
+  );
+});
+
+test("formation block layout does not give markers or zero-duration blocks overlap width", () => {
+  const blocks = layoutFormationBlocks([
+    { id: "a", time: 0, moveDuration: 0 },
+    { id: "b", time: 0.2, moveDuration: 0.2 },
+    { id: "c", time: 0.4, moveDuration: 0.2 },
+    { id: "d", time: 2, moveDuration: 0 }
+  ], 38);
+
+  assert.deepEqual(
+    blocks.map((block) => ({ id: block.sectionId, left: block.leftPx, hit: block.hitWidthPx })),
+    [
+      { id: "a", left: 0, hit: 0 },
+      { id: "b", left: 0, hit: 7.6000000000000005 },
+      { id: "c", left: 7.6000000000000005, hit: 7.6000000000000005 },
+      { id: "d", left: 76, hit: 0 }
+    ]
   );
 });
 

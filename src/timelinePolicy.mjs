@@ -164,11 +164,29 @@ export function formationTimelinePixels(section, index, pixelsPerSecond) {
   const leftPx = timeToPixels(leftTime, pixelsPerSecond);
   const arrivalPx = index === 0 ? 0 : timeToPixels(arrivalTime, pixelsPerSecond);
   return {
+    sectionId: section?.id,
     isMarker: index === 0,
     leftPx,
     arrivalPx,
     widthPx: index === 0 ? 0 : Math.max(0, arrivalPx - leftPx)
   };
+}
+
+export function layoutFormationBlocks(sections = [], pixelsPerSecond, options = {}) {
+  const minSegmentWidthPx = Math.max(0, Number(options.minSegmentWidthPx) || 0);
+
+  return sections.map((section, index) => {
+    const block = formationTimelinePixels(section, index, pixelsPerSecond);
+    const isTick = block.isMarker || block.widthPx === 0;
+    const hitWidthPx = isTick ? 0 : Math.max(block.widthPx, minSegmentWidthPx);
+    return {
+      ...block,
+      isTick,
+      row: 0,
+      hitWidthPx,
+      visualRightPx: block.leftPx + hitWidthPx
+    };
+  });
 }
 
 export function resolveFormationAddTarget(sections, captureTime, options = {}) {
@@ -271,27 +289,37 @@ export function trimFormationSegment({ sections = [], sectionId, edge, time, tim
   if (edge !== "right") return sortedSections;
 
   const nextSection = sortedSections[index + 1] || null;
-  const nextStart = nextSection ? quantizeTimelineTime(pointMoveStart(nextSection)) : quantizeTimelineTime(Math.max(Number(timelineMax) || 0, requestedTime, end));
-  const nextEndTime = Math.max(start, requestedTime);
-  const delta = quantizeTimelineDelta(nextEndTime - end);
-  const gapDelta = quantizeTimelineDelta(Math.max(0, nextStart - end));
-  const selectedDelta = quantizeTimelineDelta(delta < 0 ? Math.max(delta, -Math.max(0, end - start)) : delta);
-  const rippleDelta = quantizeTimelineDelta(Math.max(0, selectedDelta - gapDelta));
+  const nextStart = nextSection
+    ? quantizeTimelineTime(pointMoveStart(nextSection))
+    : quantizeTimelineTime(Math.max(Number(timelineMax) || 0, requestedTime, end));
+  const requestedEnd = Math.max(start, requestedTime);
+  const maxEnd = Math.max(start, nextStart);
+  const updatedSelectedEnd = requestedEnd >= end
+    ? quantizeTimelineTime(clampValue(requestedEnd, start, maxEnd))
+    : quantizeTimelineTime(clampValue(requestedEnd, start, end));
+  const selectedDelta = quantizeTimelineDelta(updatedSelectedEnd - end);
+  let contiguousCursor = end;
+  let shouldRippleContiguous = selectedDelta < 0;
 
   return sortedSections.map((item, itemIndex) => {
     if (itemIndex < index) return item;
     if (itemIndex === index) {
-      const updatedEnd = quantizeTimelineTime(end + selectedDelta);
-      return { ...item, time: updatedEnd, end: updatedEnd, start, moveDuration: quantizeTimelineDelta(updatedEnd - start) };
+      return { ...item, time: updatedSelectedEnd, end: updatedSelectedEnd, start, moveDuration: quantizeTimelineDelta(updatedSelectedEnd - start) };
     }
-    if (rippleDelta <= 0) return item;
-    const itemEnd = quantizeTimelineTime(pointTime(item) + rippleDelta);
+    if (!shouldRippleContiguous) return item;
+    const itemStart = quantizeTimelineTime(pointMoveStart(item));
+    if (Math.abs(itemStart - contiguousCursor) > TIMELINE_TIME_STEP / 2) {
+      shouldRippleContiguous = false;
+      return item;
+    }
+    contiguousCursor = quantizeTimelineTime(pointTime(item));
+    const itemEnd = quantizeTimelineTime(pointTime(item) + selectedDelta);
     const itemDuration = quantizeTimelineDelta(pointMoveDuration(item));
     return {
       ...item,
       time: itemEnd,
       end: itemEnd,
-      start: Math.max(0, itemEnd - itemDuration)
+      start: quantizeTimelineTime(Math.max(0, itemEnd - itemDuration))
     };
   });
 }

@@ -897,7 +897,6 @@ h3 {
 }
 
 .formation-block {
-  --formation-marker-half: 34px;
   --formation-handle-width: 9px;
   position: absolute;
   top: 7px;
@@ -925,8 +924,40 @@ h3 {
 
 .formation-block.marker {
   left: var(--formation-left);
-  width: 68px;
-  max-width: 68px;
+}
+
+.formation-block.tick {
+  width: 0;
+  max-width: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.formation-block.tick::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  border-radius: 99px;
+  background: #f8fafc;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.35), 0 0 10px rgba(248, 250, 252, 0.48);
+}
+
+.formation-block.tick strong,
+.formation-block.tick em {
+  display: none;
+}
+
+.formation-block.tick .formation-block-index {
+  position: absolute;
+  top: 7px;
+  left: 6px;
 }
 
 .formation-block.segment {
@@ -1046,6 +1077,18 @@ h3 {
 .formation-block.selected {
   border-color: #f8fafc;
   background: linear-gradient(135deg, #2563eb 0%, #8b5cf6 100%);
+}
+
+.formation-block.blocked-left,
+.formation-block.blocked-right {
+  border-color: #facc15;
+  box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.28), 0 10px 24px rgba(37, 99, 235, 0.3);
+}
+
+.formation-block.blocked-left .formation-resize-handle.left,
+.formation-block.blocked-right .formation-resize-handle.right {
+  background: #facc15;
+  cursor: not-allowed;
 }
 
 .audio-lane {
@@ -1595,15 +1638,14 @@ h3 {
   }
 
   .formation-block {
-    --formation-marker-half: 30px;
-    width: var(--formation-width);
+    width: var(--formation-hit-width, var(--formation-width));
     min-height: 36px;
     padding: 7px 8px;
   }
 
   .formation-block.marker {
-    width: 60px;
-    max-width: 60px;
+    width: 0;
+    max-width: 0;
   }
 
   .selected-formation-bar {

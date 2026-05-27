@@ -21,13 +21,14 @@ test("bottom timeline uses formation and audio lanes", () => {
   assert.match(appSource, /<span className="timeline-row-label">Forms<\/span>/);
   assert.match(appSource, /<span className="timeline-row-label">Audio<\/span>/);
   assert.match(appSource, /formationTimelineLabel\(index\)/);
-  assert.match(appSource, /formationTimelinePixels\(section, index, timelinePixelsPerSecond\)/);
+  assert.match(appSource, /layoutFormationBlocks\(sortedSections, timelinePixelsPerSecond\)/);
   assert.match(appSource, /timelineFormationBlocks/);
-  assert.match(appSource, /const visualShiftPx = Math\.max\(0, visualLeftPx - block\.leftPx\);/);
-  assert.match(appSource, /Math\.max\(block\.widthPx - visualShiftPx, 56\)/);
-  assert.match(appSource, /"--formation-left": `\$\{block\.visualLeftPx \?\? block\.leftPx\}px`/);
+  assert.doesNotMatch(appSource, /visualLeftPx/);
+  assert.doesNotMatch(appSource, /visualShiftPx/);
+  assert.match(appSource, /"--formation-left": `\$\{block\.leftPx\}px`/);
+  assert.doesNotMatch(appSource, /"--formation-top"/);
   assert.match(appSource, /"--formation-width": `\$\{block\.widthPx\}px`/);
-  assert.match(appSource, /"--formation-hit-width": `\$\{block\.hitWidthPx/);
+  assert.match(appSource, /"--formation-hit-width": `\$\{block\.hitWidthPx\}px`/);
   assert.match(appSource, /"--formation-arrival": `\$\{block\.arrivalPx\}px`/);
   assert.match(appSource, /className="timeline-viewport timeline-ruler-viewport"/);
   assert.match(appSource, /onWheel=\{onTimelineWheel\}/);
@@ -47,10 +48,13 @@ test("formation blocks use HitCut-style pixel timeline controls", () => {
   const formationMarkerRule = styleSource.match(/\.formation-block\.marker \{[\s\S]*?\}/)?.[0] || "";
   const viewportRule = styleSource.match(/\.timeline-viewport \{[\s\S]*?\}/)?.[0] || "";
 
-  assert.match(formationBlockRule, /--formation-marker-half:\s*34px;/);
+  assert.doesNotMatch(formationBlockRule, /--formation-marker-half/);
+  assert.match(formationBlockRule, /top:\s*7px;/);
   assert.match(formationBlockRule, /left:\s*var\(--formation-left\);/);
   assert.match(formationBlockRule, /box-sizing:\s*border-box;/);
   assert.match(formationBlockRule, /width:\s*var\(--formation-hit-width, var\(--formation-width\)\);/);
+  assert.match(styleSource, /\.formation-block\.tick \{[\s\S]*?width:\s*0;/);
+  assert.match(styleSource, /\.formation-block\.tick::before \{/);
   assert.doesNotMatch(formationMarkerRule, /transform:\s*translateX\(-50%\);/);
   assert.match(viewportRule, /overflow:\s*hidden;/);
   assert.match(styleSource, /\.formation-block\.segment \{[\s\S]*?min-width:\s*0;/);
@@ -118,7 +122,8 @@ test("selected formation segment exposes drag and two trim handles", () => {
   assert.match(appSource, /onFormationPointerDown\(event, section, index, "body"\)/);
   assert.match(appSource, /onFormationPointerDown\(event, section, index, "left"\)/);
   assert.match(appSource, /onFormationPointerDown\(event, section, index, "right"\)/);
-  assert.match(appSource, /snapTimelineTime\(startMoveStart \+ deltaTime, section, previousArrival, startArrival\)/);
+  assert.match(appSource, /const rawStart = startMoveStart \+ deltaTime;/);
+  assert.match(appSource, /snapTimelineTime\(rawStart, section, previousArrival, startArrival\)/);
   assert.match(appSource, /trimFormationSegment\(\{/);
   assert.match(appSource, /edge: "right"/);
   assert.match(appSource, /resolveFormationBodyDrag\(\{/);
@@ -152,13 +157,17 @@ test("selected movement segments expose keyframe ticks and reorder preview", () 
   assert.match(styleSource, /\.timeline-reorder-preview \{/);
   assert.match(styleSource, /--formation-hit-width/);
   assert.match(styleSource, /--formation-handle-width/);
+  assert.match(appSource, /timelineBlockedEdge/);
+  assert.match(styleSource, /\.formation-block\.blocked-left,/);
+  assert.match(styleSource, /\.formation-block\.blocked-right/);
 });
 
 test("timeline pointer drags batch undo history until pointerup", () => {
   assert.match(appSource, /interactiveEditSnapshotRef/);
   assert.match(appSource, /beginInteractiveEdit\(\);/);
-  assert.match(appSource, /finishInteractiveEdit\(hasDragged\);/);
-  assert.match(appSource, /replaceSections\(trimFormationSegment\(\{/);
+  assert.match(appSource, /finishInteractiveEdit\(hasEdited\);/);
+  assert.match(appSource, /replaceSectionsIfChanged\(nextSections\);/);
+  assert.match(appSource, /const nextSections = trimFormationSegment\(\{/);
   assert.match(appSource, /\}\), \{ history: false \}\);/);
   assert.match(appSource, /updateMovementKeyframes\(section\.id,[\s\S]*?\{ history: false \}\)/);
 });
@@ -175,6 +184,9 @@ test("formation add follows sequential append selection policy", () => {
 
 test("top actions expose save share and tools without legacy tabs", () => {
   assert.match(appSource, /<button className="primary" onClick=\{saveProjectToCloud\}>저장하기<\/button>/);
+  assert.match(appSource, /<button onClick=\{\(\) => setIsProjectMenuOpen\(\(value\) => !value\)\}>프로젝트<\/button>/);
+  assert.match(appSource, /<button onClick=\{returnToProjectPicker\}>프로젝트 선택으로 돌아가기<\/button>/);
+  assert.match(appSource, /localStorage\.removeItem\(STORAGE_KEY\);/);
   assert.match(appSource, /<button onClick=\{\(\) => setIsShareMenuOpen\(\(value\) => !value\)\}>공유<\/button>/);
   assert.match(appSource, /\{isToolDrawerOpen \? "도구 닫기" : "도구"\}/);
   assert.doesNotMatch(appSource, /const MOBILE_TABS/);
