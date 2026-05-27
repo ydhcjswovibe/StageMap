@@ -5,7 +5,29 @@ import { findIndependentMergeCandidate, resolveDropAction, resolveEmptyStageTap,
 import { createProjectJsonDownload } from "./projectJson.mjs";
 import { partnerSetIdForAddedSection } from "./sectionPolicy.mjs";
 import { createShareUrl } from "./shareUrl.mjs";
-import { MOVEMAP_AUDIO_BUCKET, audioPublicUrl, nextAudioSourceCandidate } from "./audioStorage.mjs";
+import { MOVEMAP_AUDIO_BUCKET, audioPublicUrl, audioUploadErrorMessage, nextAudioSourceCandidate } from "./audioStorage.mjs";
+import {
+  applyMovementKeyframePositionPatch,
+  buildTimelineTicks,
+  buildWaveformBars,
+  calculateAnchoredZoomScrollX,
+  calculateTimelineMaxScrollX,
+  clampFormationTiming,
+  clampValue,
+  formationTimelineLabel,
+  formationTimelinePixels,
+  movementKeyframeTime,
+  movementKeyframePositions,
+  normalizeWheelDelta,
+  normalizeMovementKeyframes,
+  pixelsToTime,
+  quantizeTimelineTime,
+  reorderFormationSegments,
+  resolveFormationBodyDrag,
+  resolveFormationAddTarget,
+  snapFormationTime,
+  trimFormationSegment
+} from "./timelinePolicy.mjs";
 
 const STORAGE_KEY = "movemap-project";
 const LEGACY_STORAGE_KEY = "choreo-stage-planner-project";
@@ -43,10 +65,10 @@ function uid(prefix) {
 }
 
 function formatTime(seconds = 0) {
-  const safe = Math.max(0, Number(seconds) || 0);
+  const safe = quantizeTimelineTime(seconds);
   const mins = Math.floor(safe / 60);
   const secs = Math.floor(safe % 60);
-  const tenths = Math.floor((safe % 1) * 10);
+  const tenths = Math.round((safe % 1) * 10);
   return `${mins}:${String(secs).padStart(2, "0")}.${tenths}`;
 }
 
@@ -257,7 +279,8 @@ function normalizeSection(section) {
     moveDuration,
     start: Math.max(0, time - moveDuration),
     end: time,
-    moveMode: section.moveMode || "smooth"
+    moveMode: section.moveMode || "smooth",
+    movementKeyframes: normalizeMovementKeyframes(section.movementKeyframes)
   };
 }
 
@@ -444,11 +467,23 @@ function displayPositions(plan, sectionIndex, time, playing) {
   if (!playing || targetIndex === 0 || time >= pointTime(section) || pointMoveDuration(section) === 0) return section.positions;
   const prev = points[targetIndex - 1];
   const progress = clamp((time - pointMoveStart(section)) / Math.max(0.01, pointMoveDuration(section)), 0, 1);
+  const anchors = [
+    { t: 0, positions: prev?.positions || section.positions },
+    ...normalizeMovementKeyframes(section.movementKeyframes)
+      .filter((keyframe) => keyframe.positions)
+      .map((keyframe) => ({ t: keyframe.t, positions: keyframe.positions })),
+    { t: 1, positions: section.positions }
+  ].sort((left, right) => left.t - right.t);
+  const nextAnchorIndex = anchors.findIndex((anchor) => progress <= anchor.t);
+  const toAnchor = anchors[nextAnchorIndex >= 0 ? nextAnchorIndex : anchors.length - 1];
+  const fromAnchor = anchors[Math.max(0, (nextAnchorIndex >= 0 ? nextAnchorIndex : anchors.length - 1) - 1)];
+  const localProgress = toAnchor.t === fromAnchor.t ? 1 : clamp((progress - fromAnchor.t) / (toAnchor.t - fromAnchor.t), 0, 1);
   const positions = {};
   plan.performers.forEach((performer) => {
-    const from = prev?.positions?.[performer.id] || section.positions[performer.id] || { x: 50, y: 50 };
-    const to = section.positions[performer.id] || from;
-    positions[performer.id] = interpolate(from, to, progress);
+    const fallback = section.positions[performer.id] || prev?.positions?.[performer.id] || { x: 50, y: 50 };
+    const from = fromAnchor.positions?.[performer.id] || fallback;
+    const to = toAnchor.positions?.[performer.id] || fallback;
+    positions[performer.id] = interpolate(from, to, localProgress);
   });
   return positions;
 }
@@ -501,7 +536,7 @@ async function uploadAudioToSupabase(file, projectKey, fingerprint = audioFinger
     if ((response.status === 400 || response.status === 409) && /already exists|duplicate|exists/i.test(errorText)) {
       return audioMetadataFromFile(file, path, fingerprint);
     }
-    throw new Error(errorText);
+    throw new Error(audioUploadErrorMessage(errorText));
   }
   return audioMetadataFromFile(file, path, fingerprint);
 }
@@ -643,12 +678,21 @@ function App() {
   const [isShareMenuOpen, setIsShareMenuOpen] = useState(false);
   const [isBottomSheetExpanded, setIsBottomSheetExpanded] = useState(false);
   const [isStageFocus, setIsStageFocus] = useState(false);
+  const [timelinePixelsPerSecond, setTimelinePixelsPerSecond] = useState(38);
+  const [timelineScrollX, setTimelineScrollX] = useState(0);
+  const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
+  const [timelineSnapTime, setTimelineSnapTime] = useState(null);
+  const [timelineReorderPreview, setTimelineReorderPreview] = useState(null);
+  const [selectedMovementKeyframeId, setSelectedMovementKeyframeId] = useState("");
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
   const audioRef = useRef(null);
   const svgRef = useRef(null);
+  const timelineViewportRef = useRef(null);
   const dragStateRef = useRef(null);
+  const interactiveEditSnapshotRef = useRef(null);
   const ignoreNextStageTapRef = useRef(false);
+  const ignoreNextFormationClickRef = useRef(false);
   const longPressTimerRef = useRef(null);
   const localAudioUrlRef = useRef("");
   const rejectedAudioUrlsRef = useRef(new Set());
@@ -731,6 +775,20 @@ function App() {
     return () => cancelAnimationFrame(frame);
   }, [isPlaying]);
 
+  useEffect(() => {
+    const viewport = timelineViewportRef.current;
+    if (!viewport) return undefined;
+    const updateViewportWidth = () => setTimelineViewportWidth(viewport.getBoundingClientRect().width || 0);
+    updateViewportWidth();
+    if (!window.ResizeObserver) {
+      window.addEventListener("resize", updateViewportWidth);
+      return () => window.removeEventListener("resize", updateViewportWidth);
+    }
+    const observer = new ResizeObserver(updateViewportWidth);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
   const sortedSections = useMemo(() => plan ? [...plan.sections].map(normalizeSection).sort((a, b) => pointTime(a) - pointTime(b)) : [], [plan]);
   const timeSectionIndex = useMemo(() => findSectionIndex(sortedSections, currentTime), [sortedSections, currentTime]);
   const selectedSectionIndex = useMemo(() => {
@@ -743,13 +801,62 @@ function App() {
     return Math.max(duration || 0, lastSectionEnd || 120);
   }, [duration, sortedSections]);
   const sliderTime = clamp(currentTime, 0, timelineMax);
+  const timelineFormationBlocks = useMemo(() => {
+    let visualRight = 0;
+    return sortedSections.map((section, index) => {
+      const block = formationTimelinePixels(section, index, timelinePixelsPerSecond);
+      const visualLeftPx = index === 0 ? block.leftPx : Math.max(block.leftPx, visualRight + 4);
+      const visualShiftPx = Math.max(0, visualLeftPx - block.leftPx);
+      const hitWidthPx = block.isMarker ? 68 : Math.max(block.widthPx - visualShiftPx, 56);
+      visualRight = visualLeftPx + hitWidthPx;
+      return { ...block, visualLeftPx, hitWidthPx, visualRightPx: visualRight };
+    });
+  }, [sortedSections, timelinePixelsPerSecond]);
+  const timelineContentWidth = Math.max(
+    620,
+    timelineViewportWidth,
+    timelineMax * timelinePixelsPerSecond,
+    ...timelineFormationBlocks.map((block) => block.visualRightPx + 80)
+  );
+  const timelineMaxScrollX = calculateTimelineMaxScrollX(timelineMax, timelinePixelsPerSecond, timelineViewportWidth);
+  const timelineTicks = useMemo(() => buildTimelineTicks(timelineMax, {
+    pixelsPerSecond: timelinePixelsPerSecond,
+    scrollX: timelineScrollX,
+    viewportWidth: timelineViewportWidth
+  }), [timelineMax, timelinePixelsPerSecond, timelineScrollX, timelineViewportWidth]);
+  const waveformBars = useMemo(() => buildWaveformBars(96), []);
+  const playheadPixel = sliderTime * timelinePixelsPerSecond - timelineScrollX;
+  const snapPixel = timelineSnapTime === null ? null : timelineSnapTime * timelinePixelsPerSecond - timelineScrollX;
   const selectedSection = sortedSections[selectedSectionIndex];
+  const selectedMovementKeyframe = selectedSection
+    ? normalizeMovementKeyframes(selectedSection.movementKeyframes).find((keyframe) => keyframe.id === selectedMovementKeyframeId) || null
+    : null;
+  const canAddMovementKeyframe = Boolean(
+    selectedSection &&
+    selectedSectionIndex > 0 &&
+    pointMoveDuration(selectedSection) > 0 &&
+    sliderTime >= pointMoveStart(selectedSection) &&
+    sliderTime <= pointTime(selectedSection)
+  );
+  const selectedMovementKeyframeTime = selectedSection && selectedMovementKeyframe
+    ? movementKeyframeTime(selectedSection, selectedMovementKeyframe)
+    : null;
+  const stageEditTargetLabel = selectedMovementKeyframe
+    ? `중간 keyframe ${formatTime(selectedMovementKeyframeTime)}`
+    : "도착 대형";
   const activeSection = sortedSections[activeSectionIndex];
   const counts = useMemo(() => plan ? exposureCounts({ ...plan, sections: sortedSections }) : {}, [plan, sortedSections]);
+
+  useEffect(() => {
+    setTimelineScrollX((value) => clampValue(value, 0, timelineMaxScrollX));
+  }, [timelineMaxScrollX]);
   const visiblePositions = useMemo(() => {
     const base = plan ? displayPositions({ ...plan, sections: sortedSections }, activeSectionIndex, currentTime, isPlaying) : {};
-    return dragPositions ? { ...base, ...dragPositions } : base;
-  }, [plan, sortedSections, activeSectionIndex, currentTime, isPlaying, dragPositions]);
+    const editBase = !isPlaying && selectedSection && selectedMovementKeyframe
+      ? movementKeyframePositions(selectedSection, selectedMovementKeyframe)
+      : base;
+    return dragPositions ? { ...editBase, ...dragPositions } : editBase;
+  }, [plan, sortedSections, activeSectionIndex, currentTime, isPlaying, dragPositions, selectedSection, selectedMovementKeyframe]);
 
   useEffect(() => {
     if (isPlaying && activeSection?.id) {
@@ -758,11 +865,18 @@ function App() {
     }
   }, [isPlaying, activeSection?.id]);
 
+  useEffect(() => {
+    if (selectedMovementKeyframeId && !selectedMovementKeyframe) {
+      setSelectedMovementKeyframeId("");
+    }
+  }, [selectedMovementKeyframeId, selectedMovementKeyframe]);
+
   function resetTransientEditState() {
     clearLongPressTimer();
     setMagnetCandidateId("");
     setDragHint("");
     setDragPositions(null);
+    setTimelineReorderPreview(null);
     dragStateRef.current = null;
   }
 
@@ -824,47 +938,304 @@ function App() {
     setStatus("다시 실행했습니다.");
   }
 
-  function updateSection(sectionId, patch) {
+  function updateSection(sectionId, patch, options = {}) {
     updatePlan((current) => ({
       ...current,
       sections: current.sections.map((section) => section.id === sectionId ? { ...section, ...patch } : section)
-    }));
+    }), options);
   }
 
-  function updateSectionTiming(sectionId, time, moveDuration = null) {
-    const safeTime = Math.max(0, Number(time) || 0);
-    const nextMoveDuration = moveDuration === null
-      ? pointMoveDuration(sortedSections.find((section) => section.id === sectionId) || {})
-      : Math.max(0, Number(moveDuration) || 0);
-    const safeMoveDuration = Math.min(safeTime, nextMoveDuration);
-    updateSection(sectionId, {
-      time: safeTime,
-      moveDuration: safeMoveDuration,
-      start: safeTime - safeMoveDuration,
-      end: safeTime
+  function updateSectionTiming(sectionId, time, moveDuration = null, options = {}) {
+    updateSection(sectionId, clampFormationTiming({
+      sections: sortedSections,
+      sectionId,
+      time,
+      moveDuration,
+      timelineMax
+    }), options);
+  }
+
+  function replaceSections(nextSections, options = {}) {
+    updatePlan((current) => ({
+      ...current,
+      sections: nextSections
+    }), options);
+  }
+
+  function updateMovementKeyframes(sectionId, updater, options = {}) {
+    updatePlan((current) => ({
+      ...current,
+      sections: current.sections.map((section) => {
+        if (section.id !== sectionId) return section;
+        return {
+          ...section,
+          movementKeyframes: normalizeMovementKeyframes(updater(normalizeMovementKeyframes(section.movementKeyframes)))
+        };
+      })
+    }), options);
+  }
+
+  function beginInteractiveEdit() {
+    interactiveEditSnapshotRef.current = clonePlan(plan);
+  }
+
+  function finishInteractiveEdit(changed) {
+    const snapshot = interactiveEditSnapshotRef.current;
+    interactiveEditSnapshotRef.current = null;
+    if (!changed || readonly || !snapshot) return;
+    setUndoStack((stack) => [...stack.slice(-(HISTORY_LIMIT - 1)), snapshot]);
+    setRedoStack([]);
+  }
+
+  function sectionEditPositions(section, keyframeId = selectedMovementKeyframeId) {
+    const keyframe = normalizeMovementKeyframes(section?.movementKeyframes).find((item) => item.id === keyframeId);
+    return keyframe ? movementKeyframePositions(section, keyframe) : { ...(section?.positions || {}) };
+  }
+
+  function sectionWithPositionPatch(section, patch, keyframeId = selectedMovementKeyframeId, sectionPatch = {}) {
+    const keyframe = normalizeMovementKeyframes(section?.movementKeyframes).find((item) => item.id === keyframeId);
+    if (!keyframe) {
+      return {
+        ...section,
+        ...sectionPatch,
+        positions: {
+          ...(section.positions || {}),
+          ...patch
+        }
+      };
+    }
+    return {
+      ...section,
+      movementKeyframes: applyMovementKeyframePositionPatch(section.movementKeyframes, keyframe.id, section.positions, patch)
+    };
+  }
+
+  function isKeyframeEdit(section, keyframeId = selectedMovementKeyframeId) {
+    return Boolean(normalizeMovementKeyframes(section?.movementKeyframes).some((keyframe) => keyframe.id === keyframeId));
+  }
+
+  function addMovementKeyframeAtCurrentTime() {
+    if (!canAddMovementKeyframe) return;
+    const durationSeconds = pointMoveDuration(selectedSection);
+    if (!durationSeconds) return;
+    const t = clamp((sliderTime - pointMoveStart(selectedSection)) / durationSeconds, 0, 1);
+    const id = uid("mkf");
+    updateMovementKeyframes(selectedSection.id, (keyframes) => [
+      ...keyframes,
+      {
+        id,
+        sectionId: selectedSection.id,
+        t,
+        positions: visiblePositions,
+        easing: "linear"
+      }
+    ]);
+    setSelectedMovementKeyframeId(id);
+    setStatus(`${selectedSection.name} 이동 keyframe을 추가했습니다.`);
+  }
+
+  function deleteSelectedMovementKeyframe() {
+    if (!selectedSection || !selectedMovementKeyframeId) return;
+    updateMovementKeyframes(selectedSection.id, (keyframes) => keyframes.filter((keyframe) => keyframe.id !== selectedMovementKeyframeId));
+    setSelectedMovementKeyframeId("");
+    setStatus(`${selectedSection.name} 이동 keyframe을 삭제했습니다.`);
+  }
+
+  function seekTimelineToTime(nextTime) {
+    const safeTime = clamp(nextTime, 0, timelineMax);
+    setCurrentTime(safeTime);
+    if (audioRef.current) audioRef.current.currentTime = safeTime;
+  }
+
+  function timeFromTimelineClientX(clientX) {
+    const viewport = timelineViewportRef.current;
+    const rect = viewport?.getBoundingClientRect();
+    if (!rect?.width) return 0;
+    return pixelsToTime(clientX - rect.left + timelineScrollX, timelinePixelsPerSecond);
+  }
+
+  function snapTimelineTime(rawTime, section, minTime, maxTime) {
+    return snapFormationTime(rawTime, {
+      enabled: snapEnabled,
+      sections: sortedSections,
+      sectionId: section?.id,
+      playheadTime: sliderTime,
+      gridSize: 0.1,
+      threshold: 10 / timelinePixelsPerSecond,
+      minTime,
+      maxTime
     });
   }
 
-  function nudgeSelectedArrival(delta) {
-    if (!selectedSection) return;
-    updateSectionTiming(selectedSection.id, pointTime(selectedSection) + delta);
+  function onTimelineWheel(event) {
+    const viewport = timelineViewportRef.current;
+    const rect = viewport?.getBoundingClientRect();
+    if (!rect?.width) return;
+    event.preventDefault();
+    const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
+    if (event.ctrlKey || event.metaKey) {
+      const nextZoom = clampValue(timelinePixelsPerSecond * (delta > 0 ? 0.88 : 1.14), 14, 160);
+      const nextScrollX = calculateAnchoredZoomScrollX({
+        scrollX: timelineScrollX,
+        cursorViewportX: event.clientX - rect.left,
+        currentZoom: timelinePixelsPerSecond,
+        nextZoom,
+        timelineDuration: timelineMax,
+        viewportWidth: rect.width
+      });
+      setTimelinePixelsPerSecond(nextZoom);
+      setTimelineScrollX(nextScrollX);
+      return;
+    }
+    setTimelineScrollX((value) => clampValue(value + delta, 0, calculateTimelineMaxScrollX(timelineMax, timelinePixelsPerSecond, rect.width)));
   }
 
-  function setSelectedMoveDuration(moveDuration) {
-    if (!selectedSection) return;
-    updateSectionTiming(selectedSection.id, pointTime(selectedSection), moveDuration);
+  function onTimelineScrubPointerDown(event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const updateFromClientX = (clientX) => seekTimelineToTime(timeFromTimelineClientX(clientX));
+    updateFromClientX(event.clientX);
+    const onPointerMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      updateFromClientX(moveEvent.clientX);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
   }
 
-  function setSelectedMoveStart(startTime) {
-    if (!selectedSection) return;
-    const arrivalTime = pointTime(selectedSection);
-    const safeStart = clamp(Number(startTime) || 0, 0, arrivalTime);
-    updateSectionTiming(selectedSection.id, arrivalTime, arrivalTime - safeStart);
+  function onFormationPointerDown(event, section, index, mode) {
+    if (readonly) return;
+    if (mode !== "body" && index === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    ignoreNextFormationClickRef.current = true;
+    setSelectedSectionId(section.id);
+    beginInteractiveEdit();
+
+    const startClientX = event.clientX;
+    const startArrival = pointTime(section);
+    const startMoveDuration = pointMoveDuration(section);
+    const startMoveStart = pointMoveStart(section);
+    const previousArrival = index > 0 ? pointTime(sortedSections[index - 1]) : 0;
+    let hasDragged = false;
+    let reorderTargetIndex = null;
+
+    const commit = (clientX) => {
+      if (index === 0) return;
+      const deltaTime = (clientX - startClientX) / timelinePixelsPerSecond;
+      if (Math.abs(clientX - startClientX) >= 4) hasDragged = true;
+
+      if (mode === "left") {
+        const snap = snapTimelineTime(startMoveStart + deltaTime, section, previousArrival, startArrival);
+        setTimelineSnapTime(snap.snapped ? snap.time : null);
+        replaceSections(trimFormationSegment({
+          sections: sortedSections,
+          sectionId: section.id,
+          edge: "left",
+          time: snap.time,
+          timelineMax
+        }), { history: false });
+        return;
+      }
+
+      if (mode === "right") {
+        const snap = snapTimelineTime(startArrival + deltaTime, section, startMoveStart, timelineMax + Math.max(0, deltaTime));
+        setTimelineSnapTime(snap.snapped ? snap.time : null);
+        replaceSections(trimFormationSegment({
+          sections: sortedSections,
+          sectionId: section.id,
+          edge: "right",
+          time: snap.time,
+          timelineMax: Math.max(timelineMax, snap.time)
+        }), { history: false });
+        return;
+      }
+
+      const dragResult = resolveFormationBodyDrag({
+        sections: sortedSections,
+        sectionId: section.id,
+        deltaTime,
+        timelineMax
+      });
+      reorderTargetIndex = dragResult.toIndex;
+      setTimelineReorderPreview(dragResult.action === "reorder-preview" ? { sectionId: section.id, toIndex: dragResult.toIndex } : null);
+      setTimelineSnapTime(null);
+      updateSectionTiming(section.id, dragResult.end, startMoveDuration, { history: false });
+    };
+    const onPointerMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      commit(moveEvent.clientX);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      setTimelineSnapTime(null);
+      setTimelineReorderPreview(null);
+      if (!hasDragged && mode === "body") {
+        finishInteractiveEdit(false);
+        jumpTo(section);
+        return;
+      }
+      if (mode === "body" && reorderTargetIndex !== null && reorderTargetIndex !== index) {
+        replaceSections(reorderFormationSegments({
+          sections: sortedSections,
+          sectionId: section.id,
+          toIndex: reorderTargetIndex
+        }), { history: false });
+        finishInteractiveEdit(true);
+        setStatus(`${section.name} 순서를 변경했습니다.`);
+        return;
+      }
+      finishInteractiveEdit(hasDragged);
+      const action = mode === "left" ? "이동 시작" : mode === "right" ? "도착 시각" : "구간";
+      setStatus(`${section.name} ${action}을 조정했습니다.`);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
   }
 
-  function nudgeSelectedMoveStart(delta) {
-    if (!selectedSection) return;
-    setSelectedMoveStart(pointMoveStart(selectedSection) + delta);
+  function onMovementKeyframePointerDown(event, section, keyframe) {
+    if (readonly) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedSectionId(section.id);
+    setSelectedMovementKeyframeId(keyframe.id);
+    beginInteractiveEdit();
+    const startClientX = event.clientX;
+    const startT = Number(keyframe.t) || 0;
+    const durationSeconds = Math.max(0.01, pointMoveDuration(section));
+    let hasDragged = false;
+    const onPointerMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      if (Math.abs(moveEvent.clientX - startClientX) >= 3) hasDragged = true;
+      const deltaT = (moveEvent.clientX - startClientX) / timelinePixelsPerSecond / durationSeconds;
+      const absoluteTime = clampValue(
+        quantizeTimelineTime(pointMoveStart(section) + pointMoveDuration(section) * clamp(startT + deltaT, 0, 1)),
+        pointMoveStart(section),
+        pointTime(section)
+      );
+      const nextT = clamp((absoluteTime - pointMoveStart(section)) / durationSeconds, 0, 1);
+      updateMovementKeyframes(section.id, (keyframes) => keyframes.map((item) => item.id === keyframe.id ? { ...item, t: nextT } : item), { history: false });
+      setTimelineSnapTime(absoluteTime);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      setTimelineSnapTime(null);
+      finishInteractiveEdit(hasDragged);
+      if (hasDragged) {
+        setStatus(`${section.name} 이동 keyframe 위치를 조정했습니다.`);
+      } else {
+        seekTimelineToTime(movementKeyframeTime(section, keyframe));
+      }
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
   }
 
   function clientToStagePoint(event) {
@@ -1024,6 +1395,10 @@ function App() {
     updatePlan((current) => {
       const section = current.sections.find((item) => item.id === sectionId);
       if (!section) return current;
+      const keyframeId = selectedMovementKeyframe?.id || "";
+      const editingKeyframe = isKeyframeEdit(section, keyframeId);
+      const currentPositions = sectionEditPositions(section, keyframeId);
+      const editSection = { ...section, positions: currentPositions };
       const setId = section.partnerSetId || uid("partners");
       const existing = current.partnerSets.find((set) => set.id === setId);
       const baseSet = existing || { id: setId, name: `${section.name} 파트너`, pairs: [] };
@@ -1031,23 +1406,27 @@ function App() {
         ...baseSet.pairs.filter((pair) => !pair.includes(firstId) && !pair.includes(secondId)),
         [firstId, secondId]
       ];
-      const firstPosition = section.positions?.[firstId];
-      const secondPosition = section.positions?.[secondId];
+      const firstPosition = currentPositions?.[firstId];
+      const secondPosition = currentPositions?.[secondId];
       const pairCenter = center || (firstPosition && secondPosition
         ? { x: (firstPosition.x + secondPosition.x) / 2, y: (firstPosition.y + secondPosition.y) / 2 }
         : firstPosition || secondPosition || { x: 50, y: 50 });
-      const pairPositions = pairGridPlacement(current, section, firstId, secondId, pairCenter);
+      const pairPositions = pairGridPlacement(current, editSection, firstId, secondId, pairCenter);
       if (!pairPositions) return current;
       const nextPositions = {
-        ...section.positions,
+        ...currentPositions,
         ...pairPositions
       };
       return {
         ...current,
-        partnerSets: existing
+        partnerSets: editingKeyframe
+          ? current.partnerSets
+          : existing
           ? current.partnerSets.map((set) => set.id === setId ? { ...set, pairs } : set)
           : [...current.partnerSets, { ...baseSet, pairs }],
-        sections: current.sections.map((item) => item.id === sectionId ? { ...item, partnerSetId: setId, positions: nextPositions } : item)
+        sections: current.sections.map((item) => item.id === sectionId
+          ? sectionWithPositionPatch(item, nextPositions, keyframeId, editingKeyframe ? {} : { partnerSetId: setId })
+          : item)
       };
     });
     setSelectedPairKey(pairKey([firstId, secondId]));
@@ -1059,18 +1438,22 @@ function App() {
     updatePlan((current) => {
       const section = current.sections.find((item) => item.id === drag.sectionId);
       if (!section) return current;
-      const basePositions = { ...section.positions, ...(action.positions || {}) };
+      const keyframeId = drag.keyframeId || "";
+      const editingKeyframe = isKeyframeEdit(section, keyframeId);
+      const currentPositions = sectionEditPositions(section, keyframeId);
+      const editSection = { ...section, positions: currentPositions };
+      const basePositions = { ...currentPositions, ...(action.positions || {}) };
 
       if (action.type === "connect-pair") {
         const setId = section.partnerSetId || uid("partners");
         const existing = current.partnerSets.find((set) => set.id === setId);
         const baseSet = existing || { id: setId, name: `${section.name} 파트너`, pairs: [] };
         const dragged = basePositions[action.performerId];
-        const target = basePositions[action.targetId] || section.positions[action.targetId];
+        const target = basePositions[action.targetId] || currentPositions[action.targetId];
         const center = dragged && target
           ? snapPoint({ x: (dragged.x + target.x) / 2, y: (dragged.y + target.y) / 2 }, snapEnabled)
           : drag.pointer;
-        const pairPositions = pairGridPlacement(current, section, action.performerId, action.targetId, center);
+        const pairPositions = pairGridPlacement(current, editSection, action.performerId, action.targetId, center);
         if (!pairPositions) return current;
         const nextPositions = {
           ...basePositions,
@@ -1082,10 +1465,14 @@ function App() {
         ];
         return {
           ...current,
-          partnerSets: existing
+          partnerSets: editingKeyframe
+            ? current.partnerSets
+            : existing
             ? current.partnerSets.map((set) => set.id === setId ? { ...set, pairs } : set)
             : [...current.partnerSets, { ...baseSet, pairs }],
-          sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, partnerSetId: setId, positions: nextPositions } : item)
+          sections: current.sections.map((item) => item.id === drag.sectionId
+            ? sectionWithPositionPatch(item, nextPositions, keyframeId, editingKeyframe ? {} : { partnerSetId: setId })
+            : item)
         };
       }
 
@@ -1097,7 +1484,7 @@ function App() {
         if (!setId || sourcePairIndex < 0 || targetPairIndex < 0 || sourcePairIndex === targetPairIndex) {
           return {
             ...current,
-            sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, positions: basePositions } : item)
+            sections: current.sections.map((item) => item.id === drag.sectionId ? sectionWithPositionPatch(item, basePositions, keyframeId) : item)
           };
         }
         const nextPairs = currentSet.pairs.map((pair, index) => {
@@ -1106,7 +1493,7 @@ function App() {
           return pair;
         });
         const centerForPair = (pair) => {
-          const pairPositions = pair.map((id) => section.positions?.[id]).filter(Boolean);
+          const pairPositions = pair.map((id) => currentPositions?.[id]).filter(Boolean);
           if (!pairPositions.length) return { x: 50, y: 50 };
           return {
             x: pairPositions.reduce((sum, pos) => sum + pos.x, 0) / pairPositions.length,
@@ -1117,7 +1504,7 @@ function App() {
         const targetPair = nextPairs[targetPairIndex];
         const sourcePositions = pairGridPlacement(
           current,
-          section,
+          editSection,
           sourcePair[0],
           sourcePair[1],
           centerForPair(currentSet.pairs[sourcePairIndex]),
@@ -1127,7 +1514,7 @@ function App() {
         if (!sourcePositions) return current;
         const targetPositions = pairGridPlacement(
           current,
-          section,
+          editSection,
           targetPair[0],
           targetPair[1],
           centerForPair(currentSet.pairs[targetPairIndex]),
@@ -1142,35 +1529,35 @@ function App() {
         };
         return {
           ...current,
-          partnerSets: current.partnerSets.map((set) => {
+          partnerSets: editingKeyframe ? current.partnerSets : current.partnerSets.map((set) => {
             if (set.id !== setId) return set;
             return {
               ...set,
               pairs: nextPairs
             };
           }),
-          sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, positions: nextPositions } : item)
+          sections: current.sections.map((item) => item.id === drag.sectionId ? sectionWithPositionPatch(item, nextPositions, keyframeId) : item)
         };
       }
 
       if (action.type === "move-pair") {
         const movingIds = Object.keys(action.positions || {});
-        if (pairPlacementCollides(section.positions, action.positions || {}, movingIds)) return current;
+        if (pairPlacementCollides(currentPositions, action.positions || {}, movingIds)) return current;
         return {
           ...current,
-          sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, positions: basePositions } : item)
+          sections: current.sections.map((item) => item.id === drag.sectionId ? sectionWithPositionPatch(item, basePositions, keyframeId) : item)
         };
       }
 
       const sourcePairKey = action.sourcePair ? pairKey(action.sourcePair) : "";
       return {
         ...current,
-        partnerSets: sourcePairKey && section.partnerSetId
+        partnerSets: !editingKeyframe && sourcePairKey && section.partnerSetId
           ? current.partnerSets.map((set) => set.id === section.partnerSetId
             ? { ...set, pairs: set.pairs.filter((pair) => pairKey(pair) !== sourcePairKey) }
             : set)
           : current.partnerSets,
-        sections: current.sections.map((item) => item.id === drag.sectionId ? { ...item, positions: basePositions } : item)
+        sections: current.sections.map((item) => item.id === drag.sectionId ? sectionWithPositionPatch(item, basePositions, keyframeId) : item)
       };
     });
 
@@ -1203,12 +1590,17 @@ function App() {
 
   function addSection() {
     const captureTime = audioRef.current ? audioRef.current.currentTime || currentTime : currentTime;
-    const time = Math.max(0, captureTime);
-    const prevIndex = Math.max(0, findSectionIndex(sortedSections, time));
-    const previous = sortedSections[prevIndex] || sortedSections[sortedSections.length - 1];
+    const target = resolveFormationAddTarget(sortedSections, captureTime);
+    if (target.action === "select") {
+      setSelectedSectionId(target.section.id);
+      jumpTo(target.section);
+      setStatus(`${target.section.name} 대형을 선택했습니다.`);
+      return;
+    }
+    const time = target.time;
+    const previous = target.previous;
     const positions = previous?.positions || Object.fromEntries(plan.performers.map((p, index) => [p.id, { x: 18 + index * 8, y: 55 }]));
-    const gap = previous ? Math.max(0, time - pointTime(previous)) : 0;
-    const moveDuration = previous ? Math.min(4, gap) : 0;
+    const moveDuration = target.moveDuration;
     const section = {
       id: uid("sec"),
       name: `대형 ${formatTime(time)}`,
@@ -1302,7 +1694,9 @@ function App() {
     captureStagePointer(event);
     setIsBottomSheetExpanded(false);
     const pointer = clientToStagePoint(event);
-    const token = selectedSection.positions?.[performerId] || { x: pointer.x, y: pointer.y };
+    const editPositions = sectionEditPositions(selectedSection);
+    const editKeyframeId = selectedMovementKeyframe?.id || "";
+    const token = editPositions?.[performerId] || { x: pointer.x, y: pointer.y };
     const partnerSet = getPartnerSetForSection(selectedSection);
     const performerPair = pairForPerformer(partnerSet?.pairs || [], performerId);
     const performerPairKey = performerPair ? pairKey(performerPair) : "";
@@ -1321,8 +1715,8 @@ function App() {
     selectPerformer(performerId);
     if (performerPair) {
       const [firstId, secondId] = performerPair;
-      const firstStart = { ...(selectedSection.positions[firstId] || { x: pointer.x, y: pointer.y }) };
-      const secondStart = { ...(selectedSection.positions[secondId] || { x: pointer.x, y: pointer.y }) };
+      const firstStart = { ...(editPositions[firstId] || { x: pointer.x, y: pointer.y }) };
+      const secondStart = { ...(editPositions[secondId] || { x: pointer.x, y: pointer.y }) };
       dragStateRef.current = {
         mode: "pair-move",
         source: "token",
@@ -1331,6 +1725,7 @@ function App() {
         longPressReady: false,
         pair: [...performerPair],
         sectionId: selectedSection.id,
+        keyframeId: editKeyframeId,
         pointerId: event.pointerId,
         pointer,
         startPointer: pointer,
@@ -1361,6 +1756,7 @@ function App() {
       mode: "token-move",
       performerId,
       sectionId: selectedSection.id,
+      keyframeId: editKeyframeId,
       pointerId: event.pointerId,
       individual: false,
       sourcePair: performerPair ? [...performerPair] : null,
@@ -1434,7 +1830,8 @@ function App() {
     };
     const partnerSet = getPartnerSetForSection(selectedSection);
     const pairs = partnerSet?.pairs || [];
-    const nextPositions = { ...selectedSection.positions, [performerId]: nextPosition };
+    const editPositions = sectionEditPositions(selectedSection, drag.keyframeId);
+    const nextPositions = { ...editPositions, [performerId]: nextPosition };
     const swapCandidate = drag.individual && drag.sourcePair
       ? findSameRoleSwapCandidate(performerId, nextPosition, nextPositions, pairs)
       : null;
@@ -1531,24 +1928,27 @@ function App() {
     setIsBottomSheetExpanded(false);
     const pointer = clientToStagePoint(event);
     const [firstId, secondId] = pair;
+    const editPositions = sectionEditPositions(selectedSection);
+    const editKeyframeId = selectedMovementKeyframe?.id || "";
     dragStateRef.current = {
       mode: "pair-move",
       pairIndex,
       pair: [...pair],
       sectionId: selectedSection.id,
+      keyframeId: editKeyframeId,
       pointerId: event.pointerId,
       pointer,
       startPointer: pointer,
       moved: false,
       startPositions: {
-        [firstId]: { ...selectedSection.positions[firstId] },
-        [secondId]: { ...selectedSection.positions[secondId] }
+        [firstId]: { ...editPositions[firstId] },
+        [secondId]: { ...editPositions[secondId] }
       },
       finalPositions: {}
     };
     setDragPositions({
-      [firstId]: { ...selectedSection.positions[firstId] },
-      [secondId]: { ...selectedSection.positions[secondId] }
+      [firstId]: { ...editPositions[firstId] },
+      [secondId]: { ...editPositions[secondId] }
     });
     selectPair(nextPairKey);
   }
@@ -1567,7 +1967,7 @@ function App() {
       x: startCenter.x + pointer.x - basePointer.x,
       y: startCenter.y + pointer.y - basePointer.y
     };
-    const finalPositions = pairGridPlacement(plan, selectedSection, firstId, secondId, targetCenter);
+    const finalPositions = pairGridPlacement(plan, { ...selectedSection, positions: sectionEditPositions(selectedSection, drag.keyframeId) }, firstId, secondId, targetCenter);
     if (!finalPositions) {
       setDragHint("이동할 빈 그리드가 없습니다");
       return null;
@@ -1580,7 +1980,7 @@ function App() {
 
   function positionsForPairCenter(pair, center) {
     const [firstId, secondId] = pair;
-    return pairGridPlacement(plan, selectedSection, firstId, secondId, center);
+    return pairGridPlacement(plan, { ...selectedSection, positions: sectionEditPositions(selectedSection) }, firstId, secondId, center);
   }
 
   function handleStageTap(event) {
@@ -1610,6 +2010,7 @@ function App() {
         source: "tap",
         pair: [...selectedPair],
         sectionId: selectedSection.id,
+        keyframeId: selectedMovementKeyframe?.id || "",
         pointer: targetPoint,
         finalPositions
       };
@@ -1624,13 +2025,15 @@ function App() {
       x: clamp(targetPoint.x, 4, 96),
       y: clamp(targetPoint.y, 5, 95)
     };
-    const nextPositions = { ...selectedSection.positions, [selectedPerformerId]: nextPosition };
+    const editKeyframeId = selectedMovementKeyframe?.id || "";
+    const nextPositions = { ...sectionEditPositions(selectedSection, editKeyframeId), [selectedPerformerId]: nextPosition };
     const candidateId = findIndependentMagnetCandidate(selectedPerformerId, pointer, nextPositions, partnerSet?.pairs || []);
     const drag = {
       mode: "token-move",
       source: "tap",
       performerId: selectedPerformerId,
       sectionId: selectedSection.id,
+      keyframeId: editKeyframeId,
       pointer: targetPoint,
       individual: false,
       finalPositions: { [selectedPerformerId]: nextPosition }
@@ -1690,15 +2093,10 @@ function App() {
       event.target.value = "";
     } catch (error) {
       setAudioUploadStatus("failed");
-      if (!replacingAudio && localUrl) {
-        setAudioSrc("");
-        if (localAudioUrlRef.current) {
-          URL.revokeObjectURL(localAudioUrlRef.current);
-          localAudioUrlRef.current = "";
-        }
-      }
-      setStatusRecovery("audio");
-      setStatus(`${replacingAudio ? "음악 교체 실패" : "음악 업로드 실패"}: ${error.message}`);
+      setStatusRecovery(replacingAudio ? "audio" : "");
+      setStatus(replacingAudio
+        ? `음악 교체 실패: ${error.message}. 기존 음악을 유지합니다.`
+        : `음악 업로드 실패: ${error.message}. 서버 저장은 실패했지만 이 브라우저에서는 음악을 들으며 편집할 수 있습니다. 공유 링크에서 음악을 재생하려면 Supabase bucket 설정이 필요합니다.`);
       event.target.value = "";
     }
   }
@@ -1935,7 +2333,7 @@ function App() {
   const hasPngBackup = false;
   const audioUrlSaved = Boolean(resolveAudioUrl(plan.audio));
   const audioLoadFailed = audioUploadStatus === "failed" && audioUrlSaved;
-  const hasUsableAudio = Boolean(audioSrc && audioUploadStatus !== "failed");
+  const hasUsableAudio = Boolean(audioSrc);
   const musicActionLabel = audioUploadStatus === "uploading"
     ? audioUrlSaved || hasUsableAudio ? "교체 중..." : "업로드 중..."
     : audioLoadFailed ? "다시 연결" : audioUrlSaved || hasUsableAudio ? "교체" : "음악 업로드";
@@ -2093,9 +2491,17 @@ function App() {
       <div className="selected-formation-tools">
         <span>선택 대형</span>
         <strong>{selectedSection?.name || "대형 없음"}</strong>
+        <div className={selectedMovementKeyframe ? "movement-edit-target keyframe" : "movement-edit-target"}>
+          <span>무대 편집 대상</span>
+          <strong>{stageEditTargetLabel}</strong>
+          <em>{selectedMovementKeyframe ? "토큰 이동은 이 중간 위치에만 저장됩니다." : "토큰 이동은 도착 대형에 저장됩니다."}</em>
+        </div>
         {!readonly && (
           <div className="selected-formation-tool-actions">
             <button onClick={duplicateSection}>복제</button>
+            {selectedSectionIndex > 0 && <button onClick={addMovementKeyframeAtCurrentTime} disabled={!canAddMovementKeyframe}>키프레임</button>}
+            {selectedMovementKeyframeId && <button onClick={() => setSelectedMovementKeyframeId("")}>도착 대형 편집</button>}
+            {selectedMovementKeyframeId && <button onClick={deleteSelectedMovementKeyframe}>키프레임 삭제</button>}
             <button className="danger-button compact-danger" onClick={deleteSection}>삭제</button>
             <button className="danger-button compact-danger" onClick={resetSelectedFormation}>대형 초기화</button>
           </div>
@@ -2455,45 +2861,138 @@ function App() {
               })}
             </svg>
           </div>
-          <div className="formation-rail" aria-label="대형 타임라인">
-            {sortedSections.map((section) => (
-              <button
-                key={section.id}
-                className={[
-                  "formation-chip",
-                  section.id === selectedSection?.id ? "selected" : "",
-                  section.id === sortedSections[timeSectionIndex]?.id ? "current" : ""
-                ].filter(Boolean).join(" ")}
-                onClick={() => jumpTo(section)}
-                title={`${section.name} / 도착 ${formatTime(pointTime(section))}`}
-              >
-                <span>{formatTime(pointTime(section))}</span>
-                <strong>{section.name}</strong>
+          <div className="timeline-editor" aria-label="대형 타임라인">
+            <div className="timeline-controls">
+              <button className="primary playback-button" onClick={togglePlayback} disabled={!hasUsableAudio}>
+                {isPlaying ? "정지" : "재생"}
               </button>
-            ))}
-          </div>
-          <div className={`${hasUsableAudio ? "transport has-audio" : "transport no-audio"}${readonly ? " readonly" : ""}`}>
-            <button className="primary playback-button" onClick={togglePlayback} disabled={!hasUsableAudio}>
-              {isPlaying ? "정지" : "재생"}
-            </button>
-            {!readonly && <button className="secondary capture-button" onClick={addSection}>대형 추가</button>}
-            {hasUsableAudio ? (
-              <input
-                type="range"
-                min="0"
-                max={timelineMax}
-                step="0.1"
-                value={sliderTime}
-                onChange={(event) => {
-                  const next = clamp(parseNumber(event.target.value, 0), 0, timelineMax);
-                  setCurrentTime(next);
-                  if (audioRef.current) audioRef.current.currentTime = next;
-                }}
-              />
-            ) : (
-              <span className="time-track-placeholder">음악 없음</span>
-            )}
-            <span className="time-readout">{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
+              {!readonly && <button className="secondary capture-button" onClick={addSection}>대형 추가</button>}
+              <span className="time-readout">{formatTime(sliderTime)} / {formatTime(timelineMax)}</span>
+              <div className="timeline-zoom-controls" aria-label="타임라인 확대">
+                <button type="button" onClick={() => setTimelinePixelsPerSecond((value) => clampValue(value * 0.82, 14, 160))}>-</button>
+                <span>{Math.round(timelinePixelsPerSecond)}px/s</span>
+                <button type="button" onClick={() => setTimelinePixelsPerSecond((value) => clampValue(value * 1.18, 14, 160))}>+</button>
+              </div>
+            </div>
+            <div className="timeline-workbench">
+              <div className="timeline-header-spacer" />
+              <div
+                ref={timelineViewportRef}
+                className="timeline-viewport timeline-ruler-viewport"
+                onWheel={onTimelineWheel}
+                onPointerDown={onTimelineScrubPointerDown}
+              >
+                <div className="timeline-content" style={{ width: `${timelineContentWidth}px`, transform: `translateX(${-timelineScrollX}px)` }}>
+                  {timelineTicks.map((tick) => (
+                    <span
+                      key={`${tick.time}-${tick.label}`}
+                      className="timeline-tick"
+                      style={{ left: `${tick.pixel}px` }}
+                    >
+                      {tick.label}
+                    </span>
+                  ))}
+                  {snapPixel !== null && snapPixel >= 0 && snapPixel <= timelineViewportWidth && <span className="timeline-snapline" style={{ left: `${timelineSnapTime * timelinePixelsPerSecond}px` }} />}
+                </div>
+                {playheadPixel >= 0 && playheadPixel <= timelineViewportWidth && <span className="timeline-playhead" style={{ left: `${playheadPixel}px` }} />}
+              </div>
+              <span className="timeline-row-label">Forms</span>
+              <div
+                className="timeline-viewport timeline-lane"
+                onWheel={onTimelineWheel}
+                onPointerDown={onTimelineScrubPointerDown}
+              >
+                <div className="timeline-content" style={{ width: `${timelineContentWidth}px`, transform: `translateX(${-timelineScrollX}px)` }}>
+                  {sortedSections.map((section, index) => {
+                    const block = timelineFormationBlocks[index] || formationTimelinePixels(section, index, timelinePixelsPerSecond);
+                    return (
+                      <button
+                        key={section.id}
+                        className={[
+                          "formation-block",
+                          block.isMarker ? "marker" : "segment",
+                          section.id === selectedSection?.id ? "selected" : "",
+                          section.id === sortedSections[timeSectionIndex]?.id ? "current" : ""
+                        ].filter(Boolean).join(" ")}
+                        style={{
+                          "--formation-left": `${block.visualLeftPx ?? block.leftPx}px`,
+                          "--formation-width": `${block.widthPx}px`,
+                          "--formation-hit-width": `${block.hitWidthPx ?? (block.isMarker ? 68 : Math.max(block.widthPx, 56))}px`,
+                          "--formation-arrival": `${block.arrivalPx}px`
+                        }}
+                        onPointerDown={(event) => onFormationPointerDown(event, section, index, "body")}
+                        onClick={(event) => {
+                          if (ignoreNextFormationClickRef.current) {
+                            ignoreNextFormationClickRef.current = false;
+                            event.preventDefault();
+                          }
+                        }}
+                        title={`${section.name} / 도착 ${formatTime(pointTime(section))}`}
+                      >
+                        {!readonly && !block.isMarker && section.id === selectedSection?.id && (
+                          <span
+                            className="formation-resize-handle left"
+                            onPointerDown={(event) => onFormationPointerDown(event, section, index, "left")}
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span className="formation-block-index">{formationTimelineLabel(index)}</span>
+                        <strong>{section.name}</strong>
+                        <em>{formatTime(pointMoveStart(section))} - {formatTime(pointTime(section))}</em>
+                        {!block.isMarker && section.id === selectedSection?.id && normalizeMovementKeyframes(section.movementKeyframes).map((keyframe) => (
+                          <span
+                            key={keyframe.id}
+                            className={keyframe.id === selectedMovementKeyframeId ? "movement-keyframe-tick selected" : "movement-keyframe-tick"}
+                            style={{ left: `${keyframe.t * 100}%` }}
+                            title={`이동 keyframe ${formatTime(movementKeyframeTime(section, keyframe))}`}
+                            onPointerDown={(event) => onMovementKeyframePointerDown(event, section, keyframe)}
+                            aria-label={`이동 keyframe ${formatTime(movementKeyframeTime(section, keyframe))}`}
+                          />
+                        ))}
+                        {!readonly && !block.isMarker && section.id === selectedSection?.id && (
+                          <span
+                            className="formation-resize-handle right"
+                            onPointerDown={(event) => onFormationPointerDown(event, section, index, "right")}
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
+                  {timelineReorderPreview && (() => {
+                    const before = sortedSections[timelineReorderPreview.toIndex];
+                    const fallback = sortedSections[sortedSections.length - 1];
+                    const markerTime = before ? pointMoveStart(before) : pointTime(fallback);
+                    return <span className="timeline-reorder-preview" style={{ left: `${markerTime * timelinePixelsPerSecond}px` }} />;
+                  })()}
+                  {snapPixel !== null && snapPixel >= 0 && snapPixel <= timelineViewportWidth && <span className="timeline-snapline" style={{ left: `${timelineSnapTime * timelinePixelsPerSecond}px` }} />}
+                </div>
+                {playheadPixel >= 0 && playheadPixel <= timelineViewportWidth && <span className="timeline-playhead" style={{ left: `${playheadPixel}px` }} />}
+              </div>
+              <span className="timeline-row-label">Audio</span>
+              <div
+                className="timeline-viewport timeline-lane audio-lane"
+                onWheel={onTimelineWheel}
+                onPointerDown={onTimelineScrubPointerDown}
+              >
+                <div className="timeline-content" style={{ width: `${timelineContentWidth}px`, transform: `translateX(${-timelineScrollX}px)` }}>
+                  {hasUsableAudio ? (
+                    <div className="audio-waveform" aria-hidden="true">
+                      {waveformBars.map((bar, index) => (
+                        <span
+                          key={index}
+                          className="audio-bar"
+                          style={{ height: `${Math.round(bar * 100)}%` }}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="time-track-placeholder">음악 없음</span>
+                  )}
+                </div>
+                {playheadPixel >= 0 && playheadPixel <= timelineViewportWidth && <span className="timeline-playhead" style={{ left: `${playheadPixel}px` }} />}
+              </div>
+            </div>
             <audio
               ref={audioRef}
               src={audioSrc}
@@ -2539,39 +3038,18 @@ function App() {
               <div className="arrival-time-control">
                 <span>도착 시각</span>
                 <strong>{formatTime(pointTime(selectedSection))}</strong>
-                {!readonly && (
-                  <div className="arrival-nudges" aria-label="도착 시각 빠른 조정">
-                    <button onClick={() => nudgeSelectedArrival(-0.1)}>-</button>
-                    <button onClick={() => nudgeSelectedArrival(0.1)}>+</button>
-                  </div>
-                )}
               </div>
               <div className="movement-duration-control">
                 <span>이동 시작</span>
                 <strong>{formatTime(pointMoveStart(selectedSection))}</strong>
-                {!readonly && (
-                  <div className="arrival-nudges" aria-label="이동 시작 빠른 조정">
-                    <button onClick={() => nudgeSelectedMoveStart(-0.1)}>-</button>
-                    <button onClick={() => nudgeSelectedMoveStart(0.1)}>+</button>
-                  </div>
-                )}
               </div>
               <div className="movement-duration-control">
                 <span>이동 시간</span>
                 <strong>{pointMoveDuration(selectedSection)}초 · 도착 전부터 이동</strong>
-                {!readonly && (
-                  <div className="duration-chips" aria-label="이동 시간 빠른 선택">
-                    {[0, 2, 4, 8].map((seconds) => (
-                      <button
-                        key={seconds}
-                        className={pointMoveDuration(selectedSection) === seconds ? "active" : ""}
-                        onClick={() => setSelectedMoveDuration(seconds)}
-                      >
-                        {seconds === 0 ? "즉시" : `${seconds}초 전`}
-                      </button>
-                    ))}
-                  </div>
-                )}
+              </div>
+              <div className={selectedMovementKeyframe ? "movement-edit-status keyframe" : "movement-edit-status"}>
+                <span>무대 편집</span>
+                <strong>{stageEditTargetLabel}</strong>
               </div>
             </div>
           )}

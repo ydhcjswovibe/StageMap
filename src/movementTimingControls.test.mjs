@@ -16,12 +16,67 @@ test("formation creation uses the short add label", () => {
   assert.doesNotMatch(appSource, /현재 시간에 대형 만들기/);
 });
 
-test("selected formation timing uses compact tenth-second nudges", () => {
+test("bottom timeline uses formation and audio lanes", () => {
+  assert.match(appSource, /className="timeline-editor"/);
+  assert.match(appSource, /<span className="timeline-row-label">Forms<\/span>/);
+  assert.match(appSource, /<span className="timeline-row-label">Audio<\/span>/);
+  assert.match(appSource, /formationTimelineLabel\(index\)/);
+  assert.match(appSource, /formationTimelinePixels\(section, index, timelinePixelsPerSecond\)/);
+  assert.match(appSource, /timelineFormationBlocks/);
+  assert.match(appSource, /const visualShiftPx = Math\.max\(0, visualLeftPx - block\.leftPx\);/);
+  assert.match(appSource, /Math\.max\(block\.widthPx - visualShiftPx, 56\)/);
+  assert.match(appSource, /"--formation-left": `\$\{block\.visualLeftPx \?\? block\.leftPx\}px`/);
+  assert.match(appSource, /"--formation-width": `\$\{block\.widthPx\}px`/);
+  assert.match(appSource, /"--formation-hit-width": `\$\{block\.hitWidthPx/);
+  assert.match(appSource, /"--formation-arrival": `\$\{block\.arrivalPx\}px`/);
+  assert.match(appSource, /className="timeline-viewport timeline-ruler-viewport"/);
+  assert.match(appSource, /onWheel=\{onTimelineWheel\}/);
+  assert.match(appSource, /\{!readonly && <button className="secondary capture-button" onClick=\{addSection\}>대형 추가<\/button>\}/);
+});
+
+test("timeline edits use tenth-second quantization", () => {
+  assert.match(appSource, /quantizeTimelineTime/);
+  assert.match(appSource, /gridSize:\s*0\.1/);
+  assert.match(appSource, /const safe = quantizeTimelineTime\(seconds\);/);
+  assert.match(appSource, /quantizeTimelineTime\(pointMoveStart\(section\) \+ pointMoveDuration\(section\)/);
+  assert.match(appSource, /setTimelineSnapTime\(absoluteTime\);/);
+});
+
+test("formation blocks use HitCut-style pixel timeline controls", () => {
+  const formationBlockRule = styleSource.match(/\.formation-block \{[\s\S]*?\}/)?.[0] || "";
+  const formationMarkerRule = styleSource.match(/\.formation-block\.marker \{[\s\S]*?\}/)?.[0] || "";
+  const viewportRule = styleSource.match(/\.timeline-viewport \{[\s\S]*?\}/)?.[0] || "";
+
+  assert.match(formationBlockRule, /--formation-marker-half:\s*34px;/);
+  assert.match(formationBlockRule, /left:\s*var\(--formation-left\);/);
+  assert.match(formationBlockRule, /box-sizing:\s*border-box;/);
+  assert.match(formationBlockRule, /width:\s*var\(--formation-hit-width, var\(--formation-width\)\);/);
+  assert.doesNotMatch(formationMarkerRule, /transform:\s*translateX\(-50%\);/);
+  assert.match(viewportRule, /overflow:\s*hidden;/);
+  assert.match(styleSource, /\.formation-block\.segment \{[\s\S]*?min-width:\s*0;/);
+  assert.doesNotMatch(styleSource, /\.formation-block \{[\s\S]*?width:\s*max\(/);
+  assert.doesNotMatch(styleSource, /width:\s*max\(96px, var\(--formation-width\)\);/);
+  assert.match(styleSource, /\.timeline-snapline \{/);
+});
+
+test("bottom timeline scrolls inside the stage card instead of widening it", () => {
+  const stageAreaRule = styleSource.match(/\.stage-area \{[\s\S]*?\}/)?.[0] || "";
+  const timelineRule = styleSource.match(/\.timeline-editor \{[\s\S]*?\}/)?.[0] || "";
+
+  assert.match(stageAreaRule, /min-width:\s*0;/);
+  assert.match(timelineRule, /width:\s*100%;/);
+  assert.match(timelineRule, /max-width:\s*100%;/);
+  assert.match(timelineRule, /min-width:\s*0;/);
+  assert.match(timelineRule, /overflow:\s*hidden;/);
+});
+
+test("selected formation timing is read-only because trim handles own timing edits", () => {
   assert.doesNotMatch(selectedFormationBar, /현재 시간으로 맞춤/);
-  assert.match(selectedFormationBar, /onClick=\{\(\) => nudgeSelectedArrival\(-0\.1\)\}>-<\/button>/);
-  assert.match(selectedFormationBar, /onClick=\{\(\) => nudgeSelectedArrival\(0\.1\)\}>\+<\/button>/);
-  assert.match(selectedFormationBar, /onClick=\{\(\) => nudgeSelectedMoveStart\(-0\.1\)\}>-<\/button>/);
-  assert.match(selectedFormationBar, /onClick=\{\(\) => nudgeSelectedMoveStart\(0\.1\)\}>\+<\/button>/);
+  assert.doesNotMatch(selectedFormationBar, /nudgeSelectedArrival/);
+  assert.doesNotMatch(selectedFormationBar, /nudgeSelectedMoveStart/);
+  assert.doesNotMatch(selectedFormationBar, /setSelectedMoveDuration/);
+  assert.doesNotMatch(selectedFormationBar, /arrival-nudges/);
+  assert.doesNotMatch(selectedFormationBar, /duration-chips/);
 });
 
 test("selected formation bar separates arrival and movement start timing", () => {
@@ -31,11 +86,6 @@ test("selected formation bar separates arrival and movement start timing", () =>
   assert.match(selectedFormationBar, /\{formatTime\(pointMoveStart\(selectedSection\)\)\}/);
   assert.match(selectedFormationBar, /<span>이동 시간<\/span>/);
   assert.match(selectedFormationBar, /\{pointMoveDuration\(selectedSection\)\}초 · 도착 전부터 이동/);
-});
-
-test("movement duration quick choices use immediate and common durations", () => {
-  assert.match(selectedFormationBar, /\[0, 2, 4, 8\]\.map/);
-  assert.match(selectedFormationBar, /seconds === 0 \? "즉시" : `\$\{seconds\}초 전`/);
 });
 
 test("selected formation bar keeps structural actions in tools", () => {
@@ -50,12 +100,77 @@ test("selected formation bar keeps structural actions in tools", () => {
   assert.match(selectedFormationTools, /<button className="danger-button compact-danger" onClick=\{resetSelectedFormation\}>대형 초기화<\/button>/);
 });
 
-test("movement duration cannot exceed the arrival time", () => {
-  const updateTiming = appSource.match(/function updateSectionTiming\(sectionId, time, moveDuration = null\) \{[\s\S]*?\n  \}/)?.[0] || "";
+test("movement timing cannot overlap adjacent formations", () => {
+  const updateTiming = appSource.match(/function updateSectionTiming\(sectionId, time, moveDuration = null, options = \{\}\) \{[\s\S]*?\n  \}/)?.[0] || "";
 
-  assert.match(updateTiming, /const safeMoveDuration = Math\.min\(safeTime, nextMoveDuration\);/);
-  assert.match(updateTiming, /moveDuration: safeMoveDuration/);
-  assert.match(updateTiming, /start: safeTime - safeMoveDuration/);
+  assert.match(updateTiming, /clampFormationTiming\(\{/);
+  assert.match(updateTiming, /sections: sortedSections/);
+  assert.match(updateTiming, /sectionId,/);
+  assert.match(updateTiming, /timelineMax/);
+});
+
+test("selected formation segment exposes drag and two trim handles", () => {
+  const leftHandleRule = styleSource.match(/\.formation-resize-handle\.left \{[\s\S]*?\}/)?.[0] || "";
+  const rightHandleRule = styleSource.match(/\.formation-resize-handle\.right \{[\s\S]*?\}/)?.[0] || "";
+
+  assert.match(appSource, /className="formation-resize-handle left"/);
+  assert.match(appSource, /className="formation-resize-handle right"/);
+  assert.match(appSource, /onFormationPointerDown\(event, section, index, "body"\)/);
+  assert.match(appSource, /onFormationPointerDown\(event, section, index, "left"\)/);
+  assert.match(appSource, /onFormationPointerDown\(event, section, index, "right"\)/);
+  assert.match(appSource, /snapTimelineTime\(startMoveStart \+ deltaTime, section, previousArrival, startArrival\)/);
+  assert.match(appSource, /trimFormationSegment\(\{/);
+  assert.match(appSource, /edge: "right"/);
+  assert.match(appSource, /resolveFormationBodyDrag\(\{/);
+  assert.match(appSource, /deltaTime,/);
+  assert.match(appSource, /updateSectionTiming\(section\.id, dragResult\.end, startMoveDuration, \{ history: false \}\);/);
+  assert.match(leftHandleRule, /left:\s*2px;/);
+  assert.match(rightHandleRule, /right:\s*2px;/);
+});
+
+test("selected movement segments expose keyframe ticks and reorder preview", () => {
+  assert.match(appSource, /movement-keyframe-tick/);
+  assert.match(appSource, /stageEditTargetLabel/);
+  assert.match(appSource, /movement-edit-target keyframe/);
+  assert.match(appSource, /movement-edit-status keyframe/);
+  assert.match(appSource, />도착 대형 편집<\/button>/);
+  assert.match(appSource, /aria-label=\{`이동 keyframe/);
+  assert.match(appSource, /addMovementKeyframeAtCurrentTime/);
+  assert.match(appSource, /deleteSelectedMovementKeyframe/);
+  assert.match(appSource, /onMovementKeyframePointerDown/);
+  assert.match(appSource, /movementKeyframePositions\(selectedSection, selectedMovementKeyframe\)/);
+  assert.match(appSource, /sectionWithPositionPatch\(item, nextPositions, keyframeId/);
+  assert.match(appSource, /keyframeId: selectedMovementKeyframe\?\.id \|\| ""/);
+  assert.match(appSource, /disabled=\{!canAddMovementKeyframe\}/);
+  assert.match(appSource, /resolveFormationBodyDrag\(\{/);
+  assert.doesNotMatch(appSource, /Math\.abs\(clientX - startClientX\) >= 32/);
+  assert.match(appSource, /reorderFormationSegments\(\{/);
+  assert.match(appSource, /className="timeline-reorder-preview"/);
+  assert.match(styleSource, /\.movement-keyframe-tick \{/);
+  assert.match(styleSource, /\.movement-edit-target\.keyframe \{/);
+  assert.match(styleSource, /\.movement-edit-status\.keyframe \{/);
+  assert.match(styleSource, /\.timeline-reorder-preview \{/);
+  assert.match(styleSource, /--formation-hit-width/);
+  assert.match(styleSource, /--formation-handle-width/);
+});
+
+test("timeline pointer drags batch undo history until pointerup", () => {
+  assert.match(appSource, /interactiveEditSnapshotRef/);
+  assert.match(appSource, /beginInteractiveEdit\(\);/);
+  assert.match(appSource, /finishInteractiveEdit\(hasDragged\);/);
+  assert.match(appSource, /replaceSections\(trimFormationSegment\(\{/);
+  assert.match(appSource, /\}\), \{ history: false \}\);/);
+  assert.match(appSource, /updateMovementKeyframes\(section\.id,[\s\S]*?\{ history: false \}\)/);
+});
+
+test("formation add follows sequential append selection policy", () => {
+  const addSection = appSource.match(/function addSection\(\) \{[\s\S]*?\n  \}/)?.[0] || "";
+
+  assert.match(addSection, /const target = resolveFormationAddTarget\(sortedSections, captureTime\);/);
+  assert.match(addSection, /if \(target\.action === "select"\)/);
+  assert.match(addSection, /setSelectedSectionId\(target\.section\.id\);/);
+  assert.match(addSection, /const previous = target\.previous;/);
+  assert.match(addSection, /const moveDuration = target\.moveDuration;/);
 });
 
 test("top actions expose save share and tools without legacy tabs", () => {
