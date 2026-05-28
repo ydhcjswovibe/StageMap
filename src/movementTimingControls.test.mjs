@@ -152,11 +152,15 @@ test("selected movement segments expose keyframe ticks and reorder preview", () 
   assert.match(appSource, /resolveFormationBodyDrag\(\{/);
   assert.doesNotMatch(appSource, /Math\.abs\(clientX - startClientX\) >= 32/);
   assert.match(appSource, /reorderFormationSegments\(\{/);
-  assert.match(appSource, /className="timeline-reorder-preview"/);
+  assert.match(appSource, /timeline-reorder-preview/);
+  assert.match(appSource, /timeline-reorder-slot/);
+  assert.doesNotMatch(appSource, /className="timeline-reorder-order"/);
   assert.match(styleSource, /\.movement-keyframe-tick \{/);
   assert.match(styleSource, /\.movement-edit-target\.keyframe \{/);
   assert.match(styleSource, /\.movement-edit-status\.keyframe \{/);
   assert.match(styleSource, /\.timeline-reorder-preview \{/);
+  assert.match(styleSource, /\.timeline-reorder-slot \{/);
+  assert.doesNotMatch(styleSource, /\.timeline-reorder-order \{/);
   assert.match(styleSource, /--formation-hit-width/);
   assert.match(styleSource, /--formation-handle-width/);
   assert.match(appSource, /timelineBlockedEdge/);

@@ -813,11 +813,34 @@ function App() {
   }, [duration, sortedSections]);
   const sliderTime = clamp(currentTime, 0, timelineMax);
   const timelineFormationBlocks = useMemo(() => layoutFormationBlocks(sortedSections, timelinePixelsPerSecond), [sortedSections, timelinePixelsPerSecond]);
+  const timelineReorderGuide = useMemo(() => {
+    if (!timelineReorderPreview) return null;
+    const projectedSections = reorderFormationSegments({
+      sections: sortedSections,
+      sectionId: timelineReorderPreview.sectionId,
+      toIndex: timelineReorderPreview.toIndex
+    });
+    const projectedBlocks = layoutFormationBlocks(projectedSections, timelinePixelsPerSecond);
+    const projectedIndex = projectedSections.findIndex((section) => section.id === timelineReorderPreview.sectionId);
+    if (projectedIndex <= 0) return null;
+    const previousSection = projectedSections[projectedIndex - 1];
+    const previousBlock = projectedBlocks[projectedIndex - 1];
+    const nextSection = projectedSections[projectedIndex + 1];
+    const slotLabel = nextSection
+      ? `${previousSection.name} 뒤, ${nextSection.name} 앞`
+      : `${previousSection.name} 뒤`;
+    return {
+      leftPx: previousBlock.visualRightPx,
+      isEndSlot: !nextSection,
+      slotLabel
+    };
+  }, [sortedSections, timelinePixelsPerSecond, timelineReorderPreview]);
   const timelineContentWidth = Math.max(
     620,
     timelineViewportWidth,
     timelineMax * timelinePixelsPerSecond,
-    ...timelineFormationBlocks.map((block) => block.visualRightPx + 80)
+    ...timelineFormationBlocks.map((block) => block.visualRightPx + 80),
+    timelineReorderGuide ? timelineReorderGuide.leftPx + 160 : 0
   );
   const timelineMaxScrollX = calculateTimelineMaxScrollX(timelineMax, timelinePixelsPerSecond, timelineViewportWidth);
   const timelineTicks = useMemo(() => buildTimelineTicks(timelineMax, {
@@ -3036,12 +3059,20 @@ function App() {
                       </button>
                     );
                   })}
-                  {timelineReorderPreview && (() => {
-                    const before = sortedSections[timelineReorderPreview.toIndex];
-                    const fallback = sortedSections[sortedSections.length - 1];
-                    const markerTime = before ? pointMoveStart(before) : pointTime(fallback);
-                    return <span className="timeline-reorder-preview" style={{ left: `${markerTime * timelinePixelsPerSecond}px` }} />;
-                  })()}
+                  {timelineReorderGuide && (
+                    <>
+                      <span
+                        className={timelineReorderGuide.isEndSlot ? "timeline-reorder-slot end" : "timeline-reorder-slot"}
+                        style={{ left: `${timelineReorderGuide.leftPx}px` }}
+                      />
+                      <span
+                        className={timelineReorderGuide.isEndSlot ? "timeline-reorder-preview end" : "timeline-reorder-preview"}
+                        style={{ left: `${timelineReorderGuide.leftPx}px` }}
+                      >
+                        <span className="timeline-reorder-label">{timelineReorderGuide.slotLabel}</span>
+                      </span>
+                    </>
+                  )}
                   {snapPixel !== null && snapPixel >= 0 && snapPixel <= timelineViewportWidth && <span className="timeline-snapline" style={{ left: `${timelineSnapTime * timelinePixelsPerSecond}px` }} />}
                 </div>
                 {playheadPixel >= 0 && playheadPixel <= timelineViewportWidth && <span className="timeline-playhead" style={{ left: `${playheadPixel}px` }} />}
