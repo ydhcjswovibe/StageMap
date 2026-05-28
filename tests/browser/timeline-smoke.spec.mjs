@@ -60,12 +60,12 @@ test("timeline formation editing keeps sequential segments and clean browser out
   expect(f1BodyBox).not.toBeNull();
   await page.mouse.move(f1BodyBox.x + f1BodyBox.width / 2, f1BodyBox.y + f1BodyBox.height / 2);
   await page.mouse.down();
-  await page.mouse.move(f1BodyBox.x + f1BodyBox.width / 2 + 260, f1BodyBox.y + f1BodyBox.height / 2, { steps: 8 });
+  await page.mouse.move(f1BodyBox.x + f1BodyBox.width / 2 + 1250, f1BodyBox.y + f1BodyBox.height / 2, { steps: 12 });
   await page.mouse.up();
 
   const reorderedTexts = (await formationTexts(page)).map(compactFormationText);
   expect(reorderedTexts[0]).toContain("F1 | 대형 0:08.0 | 0:00.0 - 0:06.0");
-  expect(reorderedTexts[1]).toContain("F2 | Intro | 0:06.0 - 0:10.0");
-  expect(reorderedTexts[2]).toContain("F3 | 대형 0:12.0 | 0:10.0 - 0:14.0");
+  expect(reorderedTexts[1]).toContain("F2 | 대형 0:12.0 | 0:06.0 - 0:10.0");
+  expect(reorderedTexts[2]).toContain("F3 | Intro | 0:10.0 - 0:14.0");
   expect(browserIssues).toEqual([]);
 });

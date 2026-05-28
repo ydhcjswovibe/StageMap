@@ -90,22 +90,27 @@ function bodyDragBounds(current, previousSection, nextSection, timelineMax) {
   };
 }
 
-function bodyDragReorderPreview(normalized, sectionId, index, rawStart, rawEnd, previousSection, nextSection, thresholdRatio, dragBounds) {
-  if (rawStart < dragBounds.minStart && previousSection && index > 0) {
-    const previousStart = quantizeTimelineTime(pointMoveStart(previousSection));
-    const previousDuration = quantizeTimelineDelta(pointMoveDuration(previousSection));
-    const threshold = quantizeTimelineTime(previousStart + previousDuration * (1 - thresholdRatio));
-    if (rawStart <= threshold) return blockedFormationEdit(normalized, sectionId, "reorder-preview", { ...dragBounds, toIndex: index - 1 });
+function bodyDragReorderPreview(normalized, sectionId, index, rawStart, rawEnd, thresholdRatio, dragBounds) {
+  const insertionTime = quantizeTimelineTime(rawStart);
+  const candidates = normalized.filter((section) => section.id !== sectionId);
+  let toIndex = candidates.length;
+
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+    const candidate = candidates[candidateIndex];
+    const candidateStart = quantizeTimelineTime(pointMoveStart(candidate));
+    const candidateDuration = quantizeTimelineDelta(pointMoveDuration(candidate));
+    const forwardThreshold = quantizeTimelineTime(candidateStart + candidateDuration * thresholdRatio);
+    const backwardThreshold = quantizeTimelineTime(candidateStart + candidateDuration * (1 - thresholdRatio));
+    const threshold = candidateIndex < index ? backwardThreshold : forwardThreshold;
+
+    if (insertionTime < threshold) {
+      toIndex = candidateIndex;
+      break;
+    }
   }
 
-  if (rawEnd > dragBounds.maxEnd && nextSection) {
-    const nextStart = quantizeTimelineTime(pointMoveStart(nextSection));
-    const nextDuration = quantizeTimelineDelta(pointMoveDuration(nextSection));
-    const threshold = quantizeTimelineTime(nextStart + nextDuration * thresholdRatio);
-    if (rawEnd >= threshold) return blockedFormationEdit(normalized, sectionId, "reorder-preview", { ...dragBounds, toIndex: index + 1 });
-  }
-
-  return null;
+  if (toIndex === index) return null;
+  return blockedFormationEdit(normalized, sectionId, "reorder-preview", { ...dragBounds, toIndex });
 }
 
 function moveFormationBodyEdit(normalized, sectionId, index, { deltaTime = 0, timelineMax = 0, reorderThresholdRatio = 2 / 3 } = {}) {
@@ -127,7 +132,7 @@ function moveFormationBodyEdit(normalized, sectionId, index, { deltaTime = 0, ti
     maxEnd: bounds.maxEnd
   };
 
-  const reorderPreview = bodyDragReorderPreview(normalized, sectionId, index, rawStart, rawEnd, previousSection, nextSection, thresholdRatio, dragBounds);
+  const reorderPreview = bodyDragReorderPreview(normalized, sectionId, index, rawStart, rawEnd, thresholdRatio, dragBounds);
   if (reorderPreview) return reorderPreview;
 
   if (span.start !== rawStart || span.end !== rawEnd) {

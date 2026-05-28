@@ -380,22 +380,63 @@ test("applyFormationTimelineEdit first block body drag is reorder-only", () => {
   assert.deepEqual(compactTiming(reorderPreview.sections), compactTiming(sections));
 });
 
-test("applyFormationTimelineEdit first block can reorder and hands start role to the next block", () => {
+test("applyFormationTimelineEdit first block body drag can preview multiple insertion positions", () => {
   const sections = [
     { id: "intro", time: 4, start: 0, end: 4, moveDuration: 4 },
     { id: "b", time: 8, start: 4, end: 8, moveDuration: 4 },
     { id: "c", time: 12, start: 8, end: 12, moveDuration: 4 }
   ];
 
-  const result = applyFormationTimelineEdit({ sections, action: "reorder", sectionId: "intro", toIndex: 1 });
+  const middlePreview = applyFormationTimelineEdit({ sections, action: "move-body", sectionId: "intro", deltaTime: 7, timelineMax: 16 });
+  const endPreview = applyFormationTimelineEdit({ sections, action: "move-body", sectionId: "intro", deltaTime: 11, timelineMax: 16 });
 
-  assert.equal(result.statusKind, "updated");
-  assert.deepEqual(compactTiming(result.sections), [
+  assert.equal(middlePreview.statusKind, "reorder-preview");
+  assert.equal(middlePreview.toIndex, 1);
+  assert.equal(endPreview.statusKind, "reorder-preview");
+  assert.equal(endPreview.toIndex, 2);
+  assert.deepEqual(compactTiming(endPreview.sections), compactTiming(sections));
+});
+
+test("applyFormationTimelineEdit body drag can preview multiple positions to the left", () => {
+  const sections = [
+    { id: "intro", time: 4, start: 0, end: 4, moveDuration: 4 },
+    { id: "b", time: 8, start: 4, end: 8, moveDuration: 4 },
+    { id: "c", time: 12, start: 8, end: 12, moveDuration: 4 }
+  ];
+
+  const middlePreview = applyFormationTimelineEdit({ sections, action: "move-body", sectionId: "c", deltaTime: -5, timelineMax: 16 });
+  const frontPreview = applyFormationTimelineEdit({ sections, action: "move-body", sectionId: "c", deltaTime: -9, timelineMax: 16 });
+
+  assert.equal(middlePreview.statusKind, "reorder-preview");
+  assert.equal(middlePreview.toIndex, 1);
+  assert.equal(frontPreview.statusKind, "reorder-preview");
+  assert.equal(frontPreview.toIndex, 0);
+  assert.deepEqual(compactTiming(frontPreview.sections), compactTiming(sections));
+});
+
+test("applyFormationTimelineEdit first block can reorder to any slot and hands start role to the next block", () => {
+  const sections = [
+    { id: "intro", time: 4, start: 0, end: 4, moveDuration: 4 },
+    { id: "b", time: 8, start: 4, end: 8, moveDuration: 4 },
+    { id: "c", time: 12, start: 8, end: 12, moveDuration: 4 }
+  ];
+
+  const middleResult = applyFormationTimelineEdit({ sections, action: "reorder", sectionId: "intro", toIndex: 1 });
+  const endResult = applyFormationTimelineEdit({ sections, action: "reorder", sectionId: "intro", toIndex: 2 });
+
+  assert.equal(middleResult.statusKind, "updated");
+  assert.deepEqual(compactTiming(middleResult.sections), [
     { id: "b", start: 0, end: 4, time: 4, moveDuration: 4 },
     { id: "intro", start: 4, end: 8, time: 8, moveDuration: 4 },
     { id: "c", start: 8, end: 12, time: 12, moveDuration: 4 }
   ]);
-  assertSequentialTiming(result.sections);
+  assertSequentialTiming(middleResult.sections);
+  assert.deepEqual(compactTiming(endResult.sections), [
+    { id: "b", start: 0, end: 4, time: 4, moveDuration: 4 },
+    { id: "c", start: 4, end: 8, time: 8, moveDuration: 4 },
+    { id: "intro", start: 8, end: 12, time: 12, moveDuration: 4 }
+  ]);
+  assertSequentialTiming(endResult.sections);
 });
 
 test("applyFormationTimelineEdit still blocks first block left trim", () => {
