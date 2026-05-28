@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   buildTimelineTicks,
@@ -31,12 +32,26 @@ import {
   trimFormationSegment
 } from "./timelinePolicy.mjs";
 
+const timelinePolicySource = readFileSync(new URL("./timelinePolicy.mjs", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
+
 test("quantizeTimelineTime rounds timeline edits to tenths without floating point drift", () => {
   assert.equal(quantizeTimelineTime(1.04), 1);
   assert.equal(quantizeTimelineTime(1.05), 1.1);
   assert.equal(quantizeTimelineTime(1.149999999), 1.1);
   assert.equal(quantizeTimelineTime(1.150000001), 1.2);
   assert.equal(quantizeTimelineTime(-0.04), 0);
+});
+
+test("timelinePolicy remains the public barrel for split timeline modules", () => {
+  assert.doesNotMatch(timelinePolicySource, /export function /);
+  assert.doesNotMatch(timelinePolicySource, /^function /m);
+  assert.match(timelinePolicySource, /from "\.\/timelineCore\.mjs"/);
+  assert.match(timelinePolicySource, /from "\.\/formationTimeline\.mjs"/);
+  assert.match(timelinePolicySource, /from "\.\/formationTimelineEdit\.mjs"/);
+  assert.match(timelinePolicySource, /from "\.\/movementKeyframes\.mjs"/);
+  assert.match(timelinePolicySource, /from "\.\/waveformPolicy\.mjs"/);
+  assert.match(appSource, /from "\.\/timelinePolicy\.mjs"/);
 });
 
 test("timeToPercent converts and clamps timeline values", () => {
@@ -363,7 +378,7 @@ test("applyFormationTimelineEdit blocks intro left trim and reorder", () => {
   assert.deepEqual(compactTiming(reorder.sections), compactTiming(sections));
 });
 
-test("right trim expands through the next formation by pushing following blocks", () => {
+test("compat trimFormationSegment delegates right trim expansion through the dispatcher", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -382,7 +397,7 @@ test("right trim expands through the next formation by pushing following blocks"
   );
 });
 
-test("right trim consumes empty gap then pushes following blocks", () => {
+test("compat trimFormationSegment delegates right trim past empty gaps through the dispatcher", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -412,7 +427,7 @@ test("right trim consumes empty gap then pushes following blocks", () => {
   );
 });
 
-test("right trim shrink pulls only contiguous following formation segments", () => {
+test("compat trimFormationSegment delegates right trim shrink for contiguous followers", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -433,7 +448,7 @@ test("right trim shrink pulls only contiguous following formation segments", () 
   );
 });
 
-test("trim results are quantized to tenths", () => {
+test("compat trimFormationSegment preserves tenth-second quantization", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -450,7 +465,7 @@ test("trim results are quantized to tenths", () => {
   assert.equal(rightTrimmed[2].time, 20);
 });
 
-test("left trim changes only the selected segment start", () => {
+test("compat trimFormationSegment delegates left trim without moving neighbors", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -465,7 +480,7 @@ test("left trim changes only the selected segment start", () => {
   assert.equal(trimmed[2].time, 14);
 });
 
-test("left trim locks at the previous formation boundary", () => {
+test("compat trimFormationSegment locks left trim at the previous boundary", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -480,7 +495,7 @@ test("left trim locks at the previous formation boundary", () => {
   assert.equal(trimmed[2].time, 14);
 });
 
-test("intro right trim edits the first hold duration and pushes following blocks", () => {
+test("compat trimFormationSegment delegates intro right trim and pushes following blocks", () => {
   const sections = [
     { id: "a", time: 4, start: 0, end: 4, moveDuration: 4, moveMode: "hold" },
     { id: "b", time: 10, moveDuration: 4 },
@@ -499,7 +514,7 @@ test("intro right trim edits the first hold duration and pushes following blocks
   assert.equal(trimmed[2].time, 15);
 });
 
-test("intro right trim can push a contiguous next block", () => {
+test("compat trimFormationSegment delegates intro right trim for contiguous next block", () => {
   const sections = [
     { id: "a", time: 4, start: 0, end: 4, moveDuration: 4, moveMode: "hold" },
     { id: "b", time: 8, moveDuration: 4 }
@@ -515,7 +530,7 @@ test("intro right trim can push a contiguous next block", () => {
   assert.equal(trimmed[1].moveDuration, 4);
 });
 
-test("reorder keeps intro anchored and preserves compact movement durations after the first formation", () => {
+test("compat reorder wrappers keep intro anchored and preserve compact movement durations", () => {
   const sections = [
     { id: "a", time: 4, moveDuration: 4 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -541,7 +556,7 @@ test("reorder keeps intro anchored and preserves compact movement durations afte
   );
 });
 
-test("body drag moves segment time until it reaches adjacent segment bounds", () => {
+test("compat resolveFormationBodyDrag delegates body movement until adjacent bounds", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -573,7 +588,7 @@ test("body drag moves segment time until it reaches adjacent segment bounds", ()
   );
 });
 
-test("body drag quantizes moved segment boundaries to tenths", () => {
+test("compat resolveFormationBodyDrag preserves tenth-second movement boundaries", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -593,7 +608,7 @@ test("body drag quantizes moved segment boundaries to tenths", () => {
   );
 });
 
-test("body drag turns into reorder only after crossing roughly two thirds of a neighbor", () => {
+test("compat resolveFormationBodyDrag delegates reorder preview threshold behavior", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 8, moveDuration: 3 },
@@ -631,7 +646,7 @@ test("body drag turns into reorder only after crossing roughly two thirds of a n
   );
 });
 
-test("body drag can reorder the third adjacent segment between the first and second", () => {
+test("compat resolveFormationBodyDrag delegates adjacent reorder preview behavior", () => {
   const sections = [
     { id: "a", time: 0, moveDuration: 0 },
     { id: "b", time: 4, moveDuration: 4 },
