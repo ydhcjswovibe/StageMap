@@ -6,7 +6,7 @@ import { authRedirectTo, authRequest, createMovemapSupabaseClient, getAuthSessio
 import { findIndependentMergeCandidate, resolveDropAction, resolveEmptyStageTap, resolveSelectionClick, shouldStartPairMemberPullOut } from "./dragPolicy.mjs";
 import { createProjectJsonDownload } from "./projectJson.mjs";
 import { partnerSetIdForAddedSection } from "./sectionPolicy.mjs";
-import { canCreateLink, canOwnCloudProject, planCapabilities } from "./planCapabilities.mjs";
+import { canCreateLink, canOwnCloudProject, canUseAiProposal, planCapabilities } from "./planCapabilities.mjs";
 import { createEditShareUrl, createShareUrl } from "./shareUrl.mjs";
 import { LINK_TYPES, authorizeShareRoute, createEditLinkToken, linkModeFromLocation, projectWithShareLink, projectWithShareLinkEnabled } from "./shareLinks.mjs";
 import { alignSelectedPerformers, deleteSelectionTarget, duplicateSelectionTarget, moveSelectedPerformers, performerIdsForRole, togglePerformerSelection } from "./formationTools.mjs";
@@ -1925,6 +1925,12 @@ function App() {
 
   function previewLocalProposal() {
     if (!selectedTemplatePreview || !plan) return;
+    const capabilities = planCapabilities(currentAuthRequest().userId ? plan.account?.plan || "free" : "guest");
+    if (!canUseAiProposal(capabilities, 0)) {
+      setFormationPreview(null);
+      setStatus("AI 후보는 로그인한 Free 이상 플랜에서 안전 검증 후 사용할 수 있습니다.");
+      return;
+    }
     const proposal = {
       source: `local-${selectedTemplatePreview.templateId}`,
       positions: selectedTemplatePreview.positions
@@ -2805,6 +2811,9 @@ function App() {
   const signedInOwner = Boolean(currentAuth.userId && plan.owner?.userId === currentAuth.userId);
   const authLabel = authSession?.user?.email || (currentAuth.userId ? "Google 로그인됨" : "게스트 데모");
   const currentPlanCapabilities = planCapabilities(currentAuth.userId ? plan.account?.plan || currentAuth.accountPlan || "free" : "guest");
+  const planLimitText = currentPlanCapabilities.demoOnly
+    ? "게스트 데모 · 클라우드/AI 비활성"
+    : `${currentPlanCapabilities.type.toUpperCase()} · 프로젝트 ${currentPlanCapabilities.limits.cloudProjects === Infinity ? "무제한" : currentPlanCapabilities.limits.cloudProjects} · AI ${currentPlanCapabilities.limits.aiProposalsPerMonth === Infinity ? "무제한" : `${currentPlanCapabilities.limits.aiProposalsPerMonth}/월`}`;
   const canCreateViewLink = canCreateLink(currentPlanCapabilities, LINK_TYPES.view, plan.shareLinks?.view?.projectId ? 1 : 0);
   const canCreateEditLink = canCreateLink(currentPlanCapabilities, LINK_TYPES.edit, plan.shareLinks?.edit?.projectId ? 1 : 0);
   const canManageLinks = Boolean(!readonly && plan.shareLinks?.view?.projectId && signedInOwner);
@@ -3228,6 +3237,7 @@ function App() {
           <strong>{selectedSection?.name || activeSection?.name || "대형 없음"}</strong>
           <em>{formatTime(sliderTime)} · 도착 {selectedSection ? formatTime(pointTime(selectedSection)) : "0:00.0"} · 이동 시작 {selectedSection ? formatTime(pointMoveStart(selectedSection)) : "0:00.0"}</em>
           <em>{selectedStateText}</em>
+          <em>{planLimitText}</em>
         </div>
         {renderSelectedFormationTools()}
         {renderArrangePanel()}
