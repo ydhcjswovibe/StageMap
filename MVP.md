@@ -221,7 +221,7 @@ Acceptance criteria:
 
 ### Stage 4: Stage Reference
 
-Status: `Not started`
+Status: `Implemented locally`
 
 SPEC source:
 
@@ -231,11 +231,11 @@ SPEC source:
 
 Next implementation slices:
 
-1. Add a Stage Reference layer for fixed stage marks, orientation, and context.
-2. Show Stage Reference in editor, mobile editing, shared review, and export/readable views.
-3. Keep performer selection and movement as the dominant editing interaction.
-4. Add visibility controls only where they help review/export clarity.
-5. Add tests or browser coverage for Stage Reference rendering across editor and review routes.
+1. Done: fixed Stage Reference marks are normalized in project JSON and rendered behind performers.
+2. Done: Stage Reference appears in editor and exported readable SVG/PNG/PDF paths.
+3. Done: performer selection and movement remain the dominant editing interaction.
+4. Done: visibility and label controls are local view controls.
+5. Remaining: add broader browser coverage for shared/mobile reference rendering.
 
 Acceptance criteria:
 
@@ -245,7 +245,7 @@ Acceptance criteria:
 
 ### Stage 5: Basic 3D Preview
 
-Status: `Not started`
+Status: `Implemented locally`
 
 SPEC source:
 
@@ -255,11 +255,11 @@ SPEC source:
 
 Next implementation slices:
 
-1. Add a deterministic 3D preview from existing 2D positions.
-2. Keep editing in 2D; 3D is read-only preview in MVP.
-3. Add camera presets for front/top/angled views.
-4. Add transition playback in 3D using the same timeline data.
-5. Add mobile and shared-review access to 3D preview.
+1. Done: Three.js read-only 3D preview is derived from canonical 2D positions.
+2. Done: editing remains in 2D; 3D is preview-only.
+3. Partial: angled camera preview exists; additional presets can follow.
+4. Partial: transition samples render as read-only path lines.
+5. Remaining: broaden shared-review/mobile-specific browser coverage.
 
 Acceptance criteria:
 
@@ -269,7 +269,7 @@ Acceptance criteria:
 
 ### Stage 6: Deterministic Templates
 
-Status: `Not started`
+Status: `Implemented locally`
 
 SPEC source:
 
@@ -279,11 +279,11 @@ SPEC source:
 
 Next implementation slices:
 
-1. Define a small local template library.
-2. Support applying a template to current roster count.
-3. Support saving current formation as a personal local template.
-4. Add template provenance to project JSON.
-5. Add tests for deterministic adaptation.
+1. Done: local deterministic line, two-line, V, circle, diagonal, and block templates exist.
+2. Done: templates adapt to current roster count.
+3. Remaining: saving personal local templates.
+4. Done: template provenance is stored on applied formations.
+5. Done: deterministic adaptation tests cover bounds and mutation safety.
 
 Acceptance criteria:
 
@@ -294,7 +294,7 @@ Acceptance criteria:
 
 ### Stage 7: Bounded AI Formation Generation
 
-Status: `Not started`
+Status: `Implemented locally` / `Provider pending`
 
 SPEC source:
 
@@ -304,11 +304,12 @@ SPEC source:
 
 Next implementation slices:
 
-1. Add an AI proposal interface that outputs formation candidates only.
-2. Validate proposals against roster ids, stage bounds, and movement constraints.
-3. Let user preview before applying.
-4. Record AI provenance in project JSON.
-5. Add usage limits based on account plan.
+1. Done locally: proposal interface uses bounded candidate objects only.
+2. Done: proposals validate roster ids, required performers, finite coordinates, and stage bounds.
+3. Done: user previews and explicitly accepts/rejects before mutation.
+4. Done: accepted proposals write provenance.
+5. Done locally: AI proposal limits are represented in plan capabilities.
+6. Remaining: connect a real AI provider behind this validated proposal seam.
 
 Acceptance criteria:
 
@@ -319,7 +320,7 @@ Acceptance criteria:
 
 ### Stage 8: Pro, Billing, And Team Foundations
 
-Status: `Partial`
+Status: `Implemented locally` / `Provider pending`
 
 SPEC source:
 
@@ -331,16 +332,17 @@ Current implementation:
 
 - Plan helper represents Guest, Free, Pro, and Team.
 - Free limit representation moves to real enforcement in Stage 1.
-- Billing is not implemented.
-- Team workspace is not implemented.
+- Pro and Team now have explicit named limits for projects, audio, links, exports, snapshots, AI proposals, and team members.
+- Billing state normalization is provider-neutral and ready for a billing adapter.
+- Team role placeholders exist without exposing team complexity in the first editing flow.
 
 Next implementation slices:
 
-1. Add Pro limit model on top of Stage 1 account ownership.
-2. Add billing provider behind plan interfaces.
-3. Add plan upgrade/downgrade handling.
-4. Add Team data model placeholders only after owner auth is stable.
-5. Add Team workspace/member role enforcement.
+1. Done: Pro limit model sits on top of Stage 1 account ownership.
+2. Partial: billing provider seam exists; live provider adapter remains.
+3. Remaining: plan upgrade/downgrade handling with a real provider.
+4. Done: Team role placeholders exist.
+5. Remaining: Team workspace/member persistence and enforcement.
 
 Acceptance criteria:
 
@@ -350,7 +352,7 @@ Acceptance criteria:
 
 ### Stage 9: Export, Packaging, And Hardening
 
-Status: `Partial`
+Status: `Implemented locally`
 
 SPEC source:
 
@@ -363,13 +365,16 @@ Current implementation:
 - JSON export/import exists.
 - PNG and print/PDF fallback exist.
 - Browser app works locally.
+- Import validation now returns structured, user-readable errors.
+- JSON export can include snapshot metadata while keeping projects portable.
+- Advanced exports are plan-gated while basic JSON recovery remains available.
 
 Next implementation slices:
 
-1. Harden import/export validation.
-2. Add project version/snapshot support if needed for Pro.
-3. Add better review/export layout.
-4. Keep native app packaging as a later platform step.
+1. Done: import/export validation is hardened.
+2. Done locally: snapshot metadata is attached to manual JSON export.
+3. Partial: existing review/export layout remains readable; deeper visual QA is still useful.
+4. Remaining: native app packaging as a later platform step.
 
 Acceptance criteria:
 

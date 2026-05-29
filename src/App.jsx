@@ -4,7 +4,7 @@ import { STAGE_GRID_X, STAGE_GRID_Y, findPairGridPlacement, pairPlacementCollide
 import { loadCloudProject, loadCloudProjectByEditToken, saveCloudProject, saveCloudProjectByEditToken } from "./cloudProject.mjs";
 import { authRedirectTo, authRequest, createMovemapSupabaseClient, getAuthSession, onAuthStateChange, signInWithGoogle, signInWithGoogleIdentity, signOut } from "./authClient.mjs";
 import { findIndependentMergeCandidate, resolveDropAction, resolveEmptyStageTap, resolveSelectionClick, shouldStartPairMemberPullOut } from "./dragPolicy.mjs";
-import { createProjectJsonDownload } from "./projectJson.mjs";
+import { createProjectJsonDownload, validateProjectImport, withProjectSnapshotMetadata } from "./projectJson.mjs";
 import { partnerSetIdForAddedSection } from "./sectionPolicy.mjs";
 import { canCreateLink, canOwnCloudProject, canUseAiProposal, planCapabilities } from "./planCapabilities.mjs";
 import { createEditShareUrl, createShareUrl } from "./shareUrl.mjs";
@@ -428,18 +428,6 @@ function createSampleProject() {
     }
   ].sort((left, right) => pointTime(left) - pointTime(right));
   return project;
-}
-
-function isValidPlan(value) {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    typeof value.title === "string" &&
-    Array.isArray(value.performers) &&
-    Array.isArray(value.sections) &&
-    value.sections.length > 0 &&
-    value.sections.every((section) => section && section.positions && typeof section.positions === "object")
-  );
 }
 
 function findSectionIndex(sections, time) {
@@ -951,7 +939,7 @@ function App() {
       if (!saved) continue;
       try {
         const loaded = JSON.parse(saved);
-        if (isValidPlan(loaded)) {
+        if (validateProjectImport(loaded).ok) {
           const normalized = normalizePlan(loaded);
           setPlan(normalized);
           setSelectedSectionId(normalized.sections[0]?.id || "");
@@ -2677,7 +2665,7 @@ function App() {
   }
 
   function exportJson() {
-    const { blob, filename } = createProjectJsonDownload(plan);
+    const { blob, filename } = createProjectJsonDownload(withProjectSnapshotMetadata(plan));
     const url = URL.createObjectURL(blob);
     downloadUrl(url, filename);
   }
@@ -2689,8 +2677,9 @@ function App() {
     reader.onload = () => {
       try {
     const loaded = JSON.parse(reader.result);
-        if (!isValidPlan(loaded)) {
-          setStatus("올바른 Movemap 프로젝트 파일이 아닙니다.");
+        const validation = validateProjectImport(loaded);
+        if (!validation.ok) {
+          setStatus(`올바른 Movemap 프로젝트 파일이 아닙니다: ${validation.errors[0]?.message || "형식 오류"}`);
           return;
         }
         const normalized = normalizePlan(loaded);
@@ -2814,6 +2803,7 @@ function App() {
   const planLimitText = currentPlanCapabilities.demoOnly
     ? "게스트 데모 · 클라우드/AI 비활성"
     : `${currentPlanCapabilities.type.toUpperCase()} · 프로젝트 ${currentPlanCapabilities.limits.cloudProjects === Infinity ? "무제한" : currentPlanCapabilities.limits.cloudProjects} · AI ${currentPlanCapabilities.limits.aiProposalsPerMonth === Infinity ? "무제한" : `${currentPlanCapabilities.limits.aiProposalsPerMonth}/월`}`;
+  const canUseAdvancedExports = !currentPlanCapabilities.demoOnly;
   const canCreateViewLink = canCreateLink(currentPlanCapabilities, LINK_TYPES.view, plan.shareLinks?.view?.projectId ? 1 : 0);
   const canCreateEditLink = canCreateLink(currentPlanCapabilities, LINK_TYPES.edit, plan.shareLinks?.edit?.projectId ? 1 : 0);
   const canManageLinks = Boolean(!readonly && plan.shareLinks?.view?.projectId && signedInOwner);
@@ -2866,9 +2856,9 @@ function App() {
           </>
         )}
         <button onClick={exportJson}>{readonly ? "JSON 내보내기" : "프로젝트 파일 공유"}</button>
-        <button onClick={() => exportPng()}>현재 PNG</button>
-        <button onClick={exportAllPng}>대형 PNG 전체 저장</button>
-        <button onClick={() => window.print()}>인쇄/PDF</button>
+        <button onClick={() => exportPng()} disabled={!canUseAdvancedExports}>현재 PNG</button>
+        <button onClick={exportAllPng} disabled={!canUseAdvancedExports}>대형 PNG 전체 저장</button>
+        <button onClick={() => window.print()} disabled={!canUseAdvancedExports}>인쇄/PDF</button>
         {!readonly && <label className="file-button tertiary">저장한 프로젝트 열기<input type="file" accept="application/json" onChange={importJson} /></label>}
       </div>
     );
@@ -3214,9 +3204,9 @@ function App() {
         <div className="share-actions">
           {!readonly && <button onClick={saveProjectToCloud}>저장하기</button>}
           <button onClick={exportJson}>{readonly ? "JSON 내보내기" : "프로젝트 파일 공유"}</button>
-          <button onClick={() => exportPng()}>현재 PNG</button>
-          <button onClick={exportAllPng}>대형 PNG 전체 저장</button>
-          <button onClick={() => window.print()}>인쇄/PDF</button>
+          <button onClick={() => exportPng()} disabled={!canUseAdvancedExports}>현재 PNG</button>
+          <button onClick={exportAllPng} disabled={!canUseAdvancedExports}>대형 PNG 전체 저장</button>
+          <button onClick={() => window.print()} disabled={!canUseAdvancedExports}>인쇄/PDF</button>
         </div>
 
         <div className="backup-actions">
@@ -3265,8 +3255,8 @@ function App() {
       return (
         <div className="status-actions">
           <button onClick={exportJson}>프로젝트 파일 공유</button>
-          <button onClick={() => exportPng()}>현재 PNG</button>
-          <button onClick={() => window.print()}>인쇄/PDF</button>
+          <button onClick={() => exportPng()} disabled={!canUseAdvancedExports}>현재 PNG</button>
+          <button onClick={() => window.print()} disabled={!canUseAdvancedExports}>인쇄/PDF</button>
         </div>
       );
     }
